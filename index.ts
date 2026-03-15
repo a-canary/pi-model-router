@@ -8,7 +8,8 @@
  *   - Exponential backoff on 429 + permanent costMux per provider
  *   - Passive throughput/latency tracking from observed turns
  */
-import type { AssistantMessage } from "@mariozechner/pi-ai";
+import type { AssistantMessage, Model, Context, SimpleStreamOptions, AssistantMessageEventStream } from "@mariozechner/pi-ai";
+import { streamSimple as piStreamSimple } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { truncateToWidth } from "@mariozechner/pi-tui";
@@ -632,6 +633,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_ev, ctx) => {
     load(); loadCache(); sessionStart = Date.now();
     discoverKeys();
+    registerGroupModels(ctx);
     scan().catch(() => {});
 
     // Footer
@@ -762,6 +764,46 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  // ── Virtual model groups: register as real pi models ──────────────────
+
+  function registerGroupModels(ctx: any) {
+    // Custom streamSimple that proxies to the resolved model
+    function groupStream(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
+      const groupName = model.id; // "tactical", "strategic", etc.
+      const res = resolve(groupName);
+      if (!res) throw new Error(`No available models for group "${groupName}"`);
+
+      // Find the real model from the registry
+      const { provider, modelId } = splitRef(res.selected);
+      const realModel = ctx.modelRegistry.find(provider, modelId);
+      if (!realModel) throw new Error(`Resolved model ${res.selected} not found in registry`);
+
+      // Proxy to the real model's stream
+      return piStreamSimple(realModel, context, options);
+    }
+
+    for (const [groupName, g] of Object.entries(cfg.model_groups)) {
+      const res = resolve(groupName);
+      const resolvedRef = res?.selected ?? "none";
+      const resolvedMetrics = res ? getM(resolvedRef) : null;
+
+      pi.registerProvider(groupName, {
+        baseUrl: "https://router.local", // not used — streamSimple overrides
+        api: "openai-completions",       // not used — streamSimple overrides
+        streamSimple: groupStream,
+        models: [{
+          id: groupName,
+          name: `${groupName} → ${resolvedRef}`,
+          reasoning: true,
+          input: ["text", "image"] as any,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: resolvedMetrics ? 200_000 : 128_000,
+          maxTokens: 64_000,
+        }],
+      });
+    }
+  }
+
   // ── Command: /router ───────────────────────────────────────────────────
 
   pi.registerCommand("router", {
@@ -771,6 +813,7 @@ export default function (pi: ExtensionAPI) {
       const arg = args?.trim();
       if (arg === "reload") { load(); loadCache(); ctx.ui.notify("Reloaded", "success"); return; }
       if (arg === "scan") { ctx.ui.notify("Scanning...", "info"); await scan(true); ctx.ui.notify(`Done. ${Object.keys(gdpval).length} scores, ${cache.available_models?.length ?? 0} models.`, "success"); return; }
+      if (arg === "sync") { load(); registerGroupModels(ctx); ctx.ui.notify("Re-registered group models", "success"); return; }
 
       if (arg && cfg.model_groups[arg]) {
         const g = cfg.model_groups[arg], res = resolve(arg);
@@ -842,7 +885,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       lines.push("└" + "─".repeat(71));
-      lines.push("", "/router <group> | scan | reload");
+      lines.push("", "/router <group> | scan | reload | sync");
       ctx.ui.notify(lines.join("\n"), "info");
     },
   });
