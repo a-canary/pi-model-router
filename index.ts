@@ -60,6 +60,43 @@ const GDPVAL_BUILTIN: Record<string, number> = {
   "gpt-4.5": 1320, "gpt-4o": 1200, "o3": 1400, "o4-mini": 1250,
 };
 
+// ── Provider Discovery Map ─────────────────────────────────────────────
+
+interface ProviderDef {
+  envVar?: string;        // e.g. "ANTHROPIC_API_KEY"
+  authKey?: string;       // key in ~/.pi/agent/auth.json
+  passPatterns?: string[]; // glob-ish prefixes to match in `pass ls`
+  local?: boolean;        // ollama/lm-studio — no key needed
+  billing?: string;       // default billing type
+}
+
+const PROVIDER_MAP: Record<string, ProviderDef> = {
+  "anthropic":           { envVar: "ANTHROPIC_API_KEY",    authKey: "anthropic",             passPatterns: ["api/claude", "api/anthropic"],   billing: "subscription" },
+  "openai":              { envVar: "OPENAI_API_KEY",       authKey: "openai",                passPatterns: ["api/openai"],                    billing: "pay_per_token" },
+  "google":              { envVar: "GEMINI_API_KEY",       authKey: "google",                passPatterns: ["api/gemini", "api/google"],      billing: "pay_per_token" },
+  "openrouter":          { envVar: "OPENROUTER_API_KEY",   authKey: "openrouter",            passPatterns: ["api/openrouter"],                billing: "pay_per_token" },
+  "chutes":              { envVar: "CHUTES_API_KEY",       authKey: "chutes",                passPatterns: ["api/chutes"],                    billing: "subscription" },
+  "mistral":             { envVar: "MISTRAL_API_KEY",      authKey: "mistral",               passPatterns: ["api/mistral"],                   billing: "pay_per_token" },
+  "groq":                { envVar: "GROQ_API_KEY",         authKey: "groq",                  passPatterns: ["api/groq"],                      billing: "pay_per_token" },
+  "cerebras":            { envVar: "CEREBRAS_API_KEY",     authKey: "cerebras",              passPatterns: ["api/cerebras"],                  billing: "pay_per_token" },
+  "xai":                 { envVar: "XAI_API_KEY",          authKey: "xai",                   passPatterns: ["api/xai"],                       billing: "pay_per_token" },
+  "zai":                 { envVar: "ZAI_API_KEY",          authKey: "zai",                   passPatterns: ["api/zai"],                       billing: "pay_per_token" },
+  "huggingface":         { envVar: "HF_TOKEN",             authKey: "huggingface",           passPatterns: ["api/huggingface", "api/hf"],     billing: "pay_per_token" },
+  "kimi-coding":         { envVar: "KIMI_API_KEY",         authKey: "kimi-coding",           passPatterns: ["api/kimi"],                      billing: "pay_per_token" },
+  "minimax":             { envVar: "MINIMAX_API_KEY",      authKey: "minimax",               passPatterns: ["api/minimax"],                   billing: "pay_per_token" },
+  "minimax-cn":          { envVar: "MINIMAX_CN_API_KEY",   authKey: "minimax-cn",            passPatterns: [],                                billing: "pay_per_token" },
+  "opencode":            { envVar: "OPENCODE_API_KEY",     authKey: "opencode",              passPatterns: ["api/opencode"],                  billing: "pay_per_token" },
+  "opencode-go":         { envVar: "OPENCODE_API_KEY",     authKey: "opencode-go",           passPatterns: [],                                billing: "pay_per_token" },
+  "vercel-ai-gateway":   { envVar: "AI_GATEWAY_API_KEY",   authKey: "vercel-ai-gateway",     passPatterns: ["api/vercel"],                    billing: "pay_per_token" },
+  "azure-openai":        { envVar: "AZURE_OPENAI_API_KEY", authKey: "azure-openai-responses",passPatterns: ["api/azure"],                     billing: "pay_per_token" },
+  "deepseek":            { envVar: "DEEPSEEK_API_KEY",     authKey: "deepseek",              passPatterns: ["api/deepseek"],                  billing: "pay_per_token" },
+  "github-copilot":      {                                 authKey: "github-copilot",        passPatterns: [],                                billing: "subscription" },
+  "gemini-cli":          {                                 authKey: "gemini-cli",            passPatterns: [],                                billing: "subscription" },
+  "antigravity":         {                                 authKey: "antigravity",           passPatterns: [],                                billing: "subscription" },
+  "ollama":              { local: true,                                                      passPatterns: [],                                billing: "subscription" },
+  "lm-studio":           { local: true,                                                      passPatterns: [],                                billing: "subscription" },
+};
+
 const STRIP_PRE = ["chutesai/","deepseek-ai/","qwen/","moonshotai/","zai-org/","z-ai/",
   "xiaomimimo/","minimaxai/","openai/","nvidia/","google/","mistralai/","openrouter/",
   "meta-llama/","nousresearch/","unsloth/","liquid/","tngtech/","arcee-ai/","stepfun/",
@@ -145,6 +182,101 @@ export default function (pi: ExtensionAPI) {
   function saveCache() {
     fs.mkdirSync(path.dirname(cachePath), { recursive: true });
     fs.writeFileSync(cachePath, JSON.stringify(cache, null, 2));
+  }
+
+  // ── Key Discovery ───────────────────────────────────────────────────────
+
+  let passEntries: string[] | null = null; // cached pass ls output
+  let discoveredProviders = new Set<string>();
+
+  function parsePassTree(): string[] {
+    if (passEntries !== null) return passEntries;
+    try {
+      const raw = execSync("pass ls", { encoding: "utf-8", timeout: 5000 });
+      // Parse tree output: extract leaf paths from lines like "├── api-key" or "│   └── token"
+      const lines = raw.split("\n");
+      const stack: string[] = [];
+      const entries: string[] = [];
+      for (const line of lines) {
+        if (line === "Password Store" || !line.trim()) continue;
+        // Determine depth by counting tree prefixes (each level is 4 chars: "│   " or "    ")
+        const stripped = line.replace(/[│├└─\s]/g, "");
+        if (!stripped) continue;
+        const depth = Math.floor((line.length - line.replace(/^[│ ├└─]+/, "").length) / 4);
+        stack.length = depth;
+        stack[depth] = stripped;
+        entries.push(stack.filter(Boolean).join("/"));
+      }
+      passEntries = entries;
+    } catch { passEntries = []; }
+    return passEntries;
+  }
+
+  function discoverKeys() {
+    const auth = loadAuth();
+    const entries = parsePassTree();
+
+    for (const [provId, def] of Object.entries(PROVIDER_MAP)) {
+      if (!cfg.providers) cfg.providers = {};
+      if (!cfg.providers[provId]) cfg.providers[provId] = { billing: def.billing ?? "pay_per_token" };
+      const prov = cfg.providers[provId];
+      if (!prov.keys) prov.keys = [];
+
+      const existingLabels = new Set(prov.keys.map(k => k.label ?? k.key));
+
+      // 1. Env var
+      if (def.envVar && process.env[def.envVar]) {
+        const label = `env:${def.envVar}`;
+        if (!existingLabels.has(label)) {
+          prov.keys.push({ key: def.envVar, label });
+          existingLabels.add(label);
+        }
+      }
+
+      // 2. auth.json
+      if (def.authKey && auth[def.authKey]) {
+        const authEntry = auth[def.authKey];
+        const label = "auth.json";
+        if (!existingLabels.has(label)) {
+          // Store as reference — the key field from auth.json if it's an api_key type
+          if (authEntry.key) {
+            prov.keys.push({ key: authEntry.key, label });
+          } else if (authEntry.type === "oauth" || authEntry.refresh) {
+            // OAuth — mark as available but key rotation doesn't apply
+            prov.keys.push({ key: `__oauth__:${def.authKey}`, label: "auth.json:oauth" });
+          }
+          existingLabels.add(label);
+        }
+      }
+
+      // 3. Pass store
+      if (def.passPatterns) {
+        for (const pattern of def.passPatterns) {
+          const matches = entries.filter(e => e.startsWith(pattern + "/") || e === pattern);
+          for (const m of matches) {
+            const label = `pass:${m}`;
+            if (!existingLabels.has(label)) {
+              prov.keys.push({ key: `!pass show ${m}`, label });
+              existingLabels.add(label);
+            }
+          }
+        }
+      }
+
+      // 4. Local providers — just mark as available
+      if (def.local) {
+        if (!existingLabels.has("local")) {
+          prov.keys.push({ key: "__local__", label: "local" });
+          existingLabels.add("local");
+        }
+      }
+
+      // Track discovered (has at least one key not from config)
+      if (prov.keys.length > 0) discoveredProviders.add(provId);
+
+      // Clean up empty providers
+      if (prov.keys.length === 0) delete cfg.providers[provId];
+    }
   }
 
   // ── Scan (GDPval forever, models 24hr) ─────────────────────────────────
@@ -369,6 +501,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_ev, ctx) => {
     load(); loadCache(); sessionStart = Date.now();
+    discoverKeys();
     scan().catch(() => {});
 
     // Footer
@@ -511,7 +644,7 @@ export default function (pi: ExtensionAPI) {
 
       // Overview
       const provs = new Set<string>();
-      if (cfg.providers) for (const p of Object.keys(cfg.providers)) provs.add(p);
+      if (cfg.providers) for (const p of Object.keys(cfg.providers)) { if (cfg.providers[p]?.keys?.length) provs.add(p); }
       if (cache.cost_mux) for (const p of Object.keys(cache.cost_mux)) provs.add(p);
       const lines = ["Model Router", ""];
       if (provs.size) {
@@ -519,8 +652,10 @@ export default function (pi: ExtensionAPI) {
         for (const p of provs) {
           const mux = costMux(p);
           const keys = cfg.providers?.[p]?.keys;
-          const keyInfo = keys && keys.length > 1 ? `  🔑${activeKeyLabel(p) ?? "0"}/${keys.length}` : "";
-          lines.push(`  ${p.padEnd(14)} ${cfg.providers?.[p]?.billing ?? "?"}${mux > 1 ? `  ×${mux}` : ""}${keyInfo}`);
+          const nKeys = keys?.filter(k => !k.key.startsWith("__")).length ?? 0;
+          const keyInfo = nKeys > 0 ? `  🔑${activeKeyLabel(p) ?? "0"}/${nKeys}` : "";
+          const disc = discoveredProviders.has(p) && !cache.cost_mux?.[p] ? " ✓" : "";
+          lines.push(`  ${p.padEnd(20)} ${(cfg.providers?.[p]?.billing ?? "?").padEnd(14)}${mux > 1 ? `×${mux}` : "   "}${keyInfo}${disc}`);
         }
         lines.push("");
       }

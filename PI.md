@@ -84,6 +84,24 @@ Replaces `~/.pi/agent/extensions/custom-footer.ts` (disabled to `.disabled`).
 | `resolve_model_group` | Read-only: what would a group resolve to? |
 | `update_model_metrics` | Manual metric override (rarely needed) |
 
+## Key auto-discovery
+
+On session_start, the router scans 3 sources for API keys across 24 providers:
+
+1. **Environment variables** — e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`
+2. **`~/.pi/agent/auth.json`** — existing pi auth entries (API keys + OAuth)
+3. **Pass store** — `pass ls` tree, matching patterns like `api/claude/*`, `api/openrouter/*`
+
+Discovered keys merge into in-memory `providers.*.keys[]` (config file keys take priority, never overwritten). Each key gets a label: `env:ANTHROPIC_API_KEY`, `auth.json`, `pass:api/claude/oauth-token`, etc.
+
+Local providers (ollama, lm-studio) are marked available without keys.
+
+### Supported providers (24)
+
+anthropic, openai, google, openrouter, chutes, mistral, groq, cerebras, xai, zai,
+huggingface, kimi-coding, minimax, minimax-cn, opencode, opencode-go, vercel-ai-gateway,
+azure-openai, deepseek, github-copilot, gemini-cli, antigravity, ollama, lm-studio
+
 ## Multi-key rotation
 
 Providers can have multiple API keys/tokens. On 429, the router tries rotating to the next available key before falling back to model-level backoff.

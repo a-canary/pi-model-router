@@ -36,6 +36,20 @@ effectiveCost = (baseCost || 0.01) × subDiscount(0.5) × costMux[provider]
 - **subDiscount**: 0.5× multiplier for subscription providers (sunk cost preference)
 - **costMux**: permanent per-provider multiplier that increases on repeated rate limits
 
+### Auto-Discovery (24 Providers)
+
+On startup, the router automatically discovers API keys from three sources:
+
+| Source | Example | Label |
+|--------|---------|-------|
+| Environment variables | `ANTHROPIC_API_KEY=sk-...` | `env:ANTHROPIC_API_KEY` |
+| `~/.pi/agent/auth.json` | `{ "anthropic": { "key": "..." } }` | `auth.json` |
+| Pass store (`pass ls`) | `api/claude/oauth-token` | `pass:api/claude/oauth-token` |
+
+**Supported providers:** anthropic, openai, google, openrouter, chutes, mistral, groq, cerebras, xai, zai, huggingface, kimi-coding, minimax, minimax-cn, opencode, opencode-go, vercel-ai-gateway, azure-openai, deepseek, github-copilot, gemini-cli, antigravity, ollama, lm-studio
+
+Discovered keys merge into the in-memory provider config (config file keys take priority). Local providers (ollama, lm-studio) are detected without keys. Use `/router` to see all discovered providers and their key counts.
+
 ### Multi-Key Rotation
 
 Providers can have multiple API keys or OAuth tokens. On 429, the router first tries rotating to the next available key — avoiding model-level backoff entirely:
