@@ -510,6 +510,27 @@ export default function (pi: ExtensionAPI) {
     return `${i + 1}. ${ref}  gdp:${m.gdpval}  tps:${Math.round(m.throughput_tps)}  eff:$${effCost(ref).toFixed(3)}/M  [${billing}${muxS}]${rl}${sel ? " ←" : ""}`;
   }
 
+  // Get top N models for a group, including rate-limited ones (for display)
+  function getTopModels(groupName: string, n: number): { ref: string; limited: boolean; rank: number }[] {
+    const g = cfg.model_groups[groupName];
+    if (!g) return [];
+    let c = [...g.models];
+    if (g.filter_free) c = c.filter(r => getM(r).cost_per_m === 0);
+
+    // Sort using the group's method but DON'T filter out limited models
+    if (g.method === "pipeline" && g.pipeline) {
+      for (const step of g.pipeline) {
+        c = sortBy(c, step.method);
+        if (step.top_k && step.top_k < c.length) c = c.slice(0, step.top_k);
+      }
+    } else {
+      c = sortBy(c, g.method);
+      if (g.top_k && g.top_k < c.length) c = c.slice(0, g.top_k);
+    }
+
+    return c.slice(0, n).map((ref, i) => ({ ref, limited: isLimited(ref), rank: i }));
+  }
+
   function detectGroup(ref: string): string | null {
     if (activeGroup) return activeGroup;
     for (const [n, g] of Object.entries(cfg.model_groups)) if (g.models.includes(ref)) return n;
@@ -663,30 +684,55 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(lines.filter(Boolean).join("\n"), "info"); return;
       }
 
-      // Overview
-      const provs = new Set<string>();
-      if (cfg.providers) for (const p of Object.keys(cfg.providers)) { if (cfg.providers[p]?.keys?.length) provs.add(p); }
-      if (cache.cost_mux) for (const p of Object.keys(cache.cost_mux)) provs.add(p);
-      const lines = ["Model Router", ""];
-      if (provs.size) {
-        lines.push("Providers:");
-        for (const p of provs) {
-          const mux = costMux(p);
-          const keys = cfg.providers?.[p]?.keys;
-          const nKeys = keys?.filter(k => !k.key.startsWith("__")).length ?? 0;
-          const keyInfo = nKeys > 0 ? `  🔑${activeKeyLabel(p) ?? "0"}/${nKeys}` : "";
-          const disc = discoveredProviders.has(p) && !cache.cost_mux?.[p] ? " ✓" : "";
-          lines.push(`  ${p.padEnd(20)} ${(cfg.providers?.[p]?.billing ?? "?").padEnd(14)}${mux > 1 ? `×${mux}` : "   "}${keyInfo}${disc}`);
+      // Overview with table
+      const lines: string[] = ["Model Router", ""];
+
+      // Group tables with top 3 models
+      for (const [groupName, g] of Object.entries(cfg.model_groups)) {
+        const top = getTopModels(groupName, 3);
+        const method = g.method === "pipeline"
+          ? g.pipeline!.map(s => `${s.method.slice(0, 4)}:${s.top_k ?? "∞"}`).join("→")
+          : g.method;
+        const active = curModel && g.models.includes(curModel);
+        const activeMarker = active ? " ◀" : "";
+
+        // Group header
+        lines.push(`┌─ ${groupName}${activeMarker} `.padEnd(72, "─") + ` ${method} ─`);
+
+        if (top.length === 0) {
+          lines.push("│ (no models configured)");
+        } else {
+          // Table header
+          lines.push("│ #   Model                           GDP    Lat    TPS    Cost/M   Mux   Status");
+          lines.push("│ ─   ─────────────────────────────   ───    ───    ───    ───────   ───   ──────");
+
+          for (const { ref, limited, rank } of top) {
+            const m = getM(ref);
+            const prov = ref.split("/")[0];
+            const mux = costMux(prov);
+            const cost = effCost(ref);
+            const modelShort = ref.length > 32 ? "…" + ref.slice(-31) : ref;
+            const isActive = curModel === ref ? "●" : " ";
+            const status = limited ? `⛔${limitSecs(ref)}s` : isActive ? "active" : "";
+            const muxStr = mux > 1 ? `×${mux}` : "1";
+
+            lines.push(`│ ${rank + 1}   ${modelShort.padEnd(32)} ${String(m.gdpval).padStart(4)}   ${String(Math.round(m.avg_latency_ms)).padStart(4)}   ${String(Math.round(m.throughput_tps)).padStart(3)}   $${cost.toFixed(2).padStart(6)}   ${muxStr.padStart(3)}   ${status}`);
+          }
         }
-        lines.push("");
+        lines.push("│");
       }
-      lines.push("Groups:");
-      for (const [n, g] of Object.entries(cfg.model_groups)) {
-        const m = g.method === "pipeline" ? `pipe(${g.pipeline!.map(s => s.method).join("→")})` : g.method;
-        const r = resolve(n); lines.push(`  ${n.padEnd(14)} ${m.padEnd(28)} [${g.models.length}]${r ? ` → ${r.selected}` : ""}`);
-      }
+
+      // Rate-limited summary
       const rl = [...limits.keys()].filter(r => isLimited(r));
-      if (rl.length) { lines.push("", "Rate-limited:"); rl.forEach(r => lines.push(`  ⛔ ${r} (${limitSecs(r)}s)`)); }
+      if (rl.length) {
+        lines.push("├─ Rate Limited ".padEnd(72, "─"));
+        for (const r of rl) {
+          const { provider, modelId } = splitRef(r);
+          lines.push(`│ ⛔ ${provider}/${modelId} (${limitSecs(r)}s remaining)`);
+        }
+      }
+
+      lines.push("└" + "─".repeat(71));
       lines.push("", "/router <group> | scan | reload");
       ctx.ui.notify(lines.join("\n"), "info");
     },
