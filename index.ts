@@ -66,6 +66,7 @@ interface ProviderDef {
   envVar?: string;        // e.g. "ANTHROPIC_API_KEY"
   authKey?: string;       // key in ~/.pi/agent/auth.json
   passPatterns?: string[]; // glob-ish prefixes to match in `pass ls`
+  cliAuthFiles?: { path: string; tokenField: string }[]; // CLI tool auth files (e.g. ~/.qwen/oauth_creds.json)
   local?: boolean;        // ollama/lm-studio — no key needed
   billing?: string;       // default billing type
 }
@@ -91,7 +92,8 @@ const PROVIDER_MAP: Record<string, ProviderDef> = {
   "azure-openai":        { envVar: "AZURE_OPENAI_API_KEY", authKey: "azure-openai-responses",passPatterns: ["api/azure"],                     billing: "pay_per_token" },
   "deepseek":            { envVar: "DEEPSEEK_API_KEY",     authKey: "deepseek",              passPatterns: ["api/deepseek"],                  billing: "pay_per_token" },
   "github-copilot":      {                                 authKey: "github-copilot",        passPatterns: [],                                billing: "subscription" },
-  "gemini-cli":          {                                 authKey: "gemini-cli",            passPatterns: [],                                billing: "subscription" },
+  "qwen-cli":            {                                 authKey: "qwen-cli",              passPatterns: [],  cliAuthFiles: [{ path: "~/.qwen/oauth_creds.json", tokenField: "access_token" }],  billing: "subscription" },
+  "gemini-cli":          {                                 authKey: "gemini-cli",            passPatterns: [],  cliAuthFiles: [{ path: "~/.gemini/oauth_creds.json", tokenField: "access_token" }],  billing: "subscription" },
   "antigravity":         {                                 authKey: "antigravity",           passPatterns: [],                                billing: "subscription" },
   "ollama":              { local: true,                                                      passPatterns: [],                                billing: "subscription" },
   "lm-studio":           { local: true,                                                      passPatterns: [],                                billing: "subscription" },
@@ -263,7 +265,26 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      // 4. Local providers — just mark as available
+      // 4. CLI auth files (e.g. ~/.qwen/oauth_creds.json, ~/.gemini/oauth_creds.json)
+      if (def.cliAuthFiles) {
+        for (const af of def.cliAuthFiles) {
+          const filePath = af.path.replace("~", homedir());
+          const label = `cli:${af.path}`;
+          if (!existingLabels.has(label)) {
+            try {
+              if (fs.existsSync(filePath)) {
+                const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+                if (data[af.tokenField]) {
+                  prov.keys.push({ key: `__cli_oauth__:${filePath}:${af.tokenField}`, label });
+                  existingLabels.add(label);
+                }
+              }
+            } catch { /* unreadable */ }
+          }
+        }
+      }
+
+      // 5. Local providers — just mark as available
       if (def.local) {
         if (!existingLabels.has("local")) {
           prov.keys.push({ key: "__local__", label: "local" });
