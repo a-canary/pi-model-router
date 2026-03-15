@@ -691,7 +691,7 @@ export default function (pi: ExtensionAPI) {
       for (const [groupName, g] of Object.entries(cfg.model_groups)) {
         const top = getTopModels(groupName, 3);
         const method = g.method === "pipeline"
-          ? g.pipeline!.map(s => `${s.method.slice(0, 4)}:${s.top_k ?? "∞"}`).join("→")
+          ? g.pipeline!.map(s => `${s.method}${s.top_k ? `:${s.top_k}` : ""}`).join(" → ")
           : g.method;
         const active = curModel && g.models.includes(curModel);
         const activeMarker = active ? " ◀" : "";
