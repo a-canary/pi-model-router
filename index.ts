@@ -511,6 +511,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Get top N models for a group, including rate-limited ones (for display)
+  // The final pipeline step sorts but doesn't limit — we want to see failover options
   function getTopModels(groupName: string, n: number): { ref: string; limited: boolean; rank: number }[] {
     const g = cfg.model_groups[groupName];
     if (!g) return [];
@@ -519,16 +520,26 @@ export default function (pi: ExtensionAPI) {
 
     // Sort using the group's method but DON'T filter out limited models
     if (g.method === "pipeline" && g.pipeline) {
-      for (const step of g.pipeline) {
+      for (let i = 0; i < g.pipeline.length; i++) {
+        const step = g.pipeline[i];
         c = sortBy(c, step.method);
-        if (step.top_k && step.top_k < c.length) c = c.slice(0, step.top_k);
+        // Only apply top_k for intermediate steps, not the final one (it's a ranker, not a limiter)
+        const isLastStep = i === g.pipeline.length - 1;
+        if (step.top_k && step.top_k < c.length && !isLastStep) {
+          c = c.slice(0, step.top_k);
+        }
       }
     } else {
       c = sortBy(c, g.method);
-      if (g.top_k && g.top_k < c.length) c = c.slice(0, g.top_k);
+      // For non-pipeline, don't limit either — show full ranked list
     }
 
-    return c.slice(0, n).map((ref, i) => ({ ref, limited: isLimited(ref), rank: i }));
+    // Split into available and limited, then interleave: available first, then limited
+    const available = c.filter(ref => !isLimited(ref));
+    const limited = c.filter(ref => isLimited(ref));
+    const ranked = [...available, ...limited];
+
+    return ranked.slice(0, n).map((ref, i) => ({ ref, limited: isLimited(ref), rank: i }));
   }
 
   function detectGroup(ref: string): string | null {
@@ -687,9 +698,9 @@ export default function (pi: ExtensionAPI) {
       // Overview with table
       const lines: string[] = ["Model Router", ""];
 
-      // Group tables with top 3 models
+      // Group tables with top 5 models (3 available + up to 2 limited)
       for (const [groupName, g] of Object.entries(cfg.model_groups)) {
-        const top = getTopModels(groupName, 3);
+        const top = getTopModels(groupName, 5);
         const method = g.method === "pipeline"
           ? g.pipeline!.map(s => `${s.method}${s.top_k ? `:${s.top_k}` : ""}`).join(" → ")
           : g.method;
