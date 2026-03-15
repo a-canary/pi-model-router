@@ -36,9 +36,32 @@ effectiveCost = (baseCost || 0.01) × subDiscount(0.5) × costMux[provider]
 - **subDiscount**: 0.5× multiplier for subscription providers (sunk cost preference)
 - **costMux**: permanent per-provider multiplier that increases on repeated rate limits
 
+### Multi-Key Rotation
+
+Providers can have multiple API keys or OAuth tokens. On 429, the router first tries rotating to the next available key — avoiding model-level backoff entirely:
+
+```jsonc
+"providers": {
+  "anthropic": {
+    "billing": "subscription",
+    "keys": [
+      { "key": "!pass show api/claude/token-1", "label": "primary" },
+      { "key": "!pass show api/claude/token-2", "label": "backup" }
+    ]
+  }
+}
+```
+
+On rate limit:
+1. Current key marked exhausted (1hr cooldown)
+2. Next available key activated → `~/.pi/agent/auth.json` updated → no model backoff needed
+3. If all keys exhausted → falls through to model-level backoff below
+
+Keys support `!pass show <path>` syntax for secret resolution via `pass`.
+
 ### Rate Limit Handling
 
-On HTTP 429, the model enters exponential backoff and the router immediately fails over to the next candidate:
+On HTTP 429 (after key rotation is exhausted or unavailable), the model enters exponential backoff and the router fails over to the next candidate:
 
 | Hit | Cooldown | Side Effect |
 |-----|----------|-------------|

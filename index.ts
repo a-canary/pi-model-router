@@ -15,6 +15,7 @@ import { truncateToWidth } from "@mariozechner/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { execSync } from "node:child_process";
+import { homedir } from "node:os";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -22,8 +23,10 @@ interface Metrics { gdpval: number; throughput_tps: number; avg_latency_ms: numb
 interface RateLimit { cooldown_until: number; backoff_ms: number; hits: number; }
 interface PipeStep { method: string; top_k?: number; }
 interface Group { description?: string; method: string; top_k?: number; pipeline?: PipeStep[]; models: string[]; filter_free?: boolean; }
+interface ProviderKey { key: string; label?: string; }
+interface ProviderConfig { billing: string; monthly_cost_usd?: number; keys?: ProviderKey[]; }
 interface Config {
-  providers?: Record<string, { billing: string; monthly_cost_usd?: number }>;
+  providers?: Record<string, ProviderConfig>;
   model_groups: Record<string, Group>;
   model_metrics: Record<string, Partial<Metrics>>;
   gdpval_builtin?: Record<string, number>;
@@ -33,6 +36,7 @@ interface Cache {
   models_cached?: string; available_models?: { id: string; provider: string; cost_per_m: number }[];
   benchmarks?: Record<string, number>;
   cost_mux?: Record<string, number>; cost_mux_last_bump?: Record<string, string>;
+  exhausted_keys?: Record<string, number>; // "provider:keyIdx" → exhausted_until timestamp
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -192,6 +196,71 @@ export default function (pi: ExtensionAPI) {
 
   // ── Rate Limit + costMux ───────────────────────────────────────────────
 
+  const AUTH_PATH = path.join(homedir(), ".pi", "agent", "auth.json");
+  const KEY_COOLDOWN = 3_600_000; // 1hr per exhausted key
+  let activeKeyIdx: Record<string, number> = {}; // provider → current key index
+
+  function resolveKeyValue(key: string): string {
+    if (key.startsWith("!pass show ")) {
+      try { return execSync(key.slice(1), { encoding: "utf-8" }).trim(); }
+      catch { return key; }
+    }
+    return key;
+  }
+
+  function loadAuth(): any {
+    try { return JSON.parse(fs.readFileSync(AUTH_PATH, "utf-8")); } catch { return {}; }
+  }
+
+  function saveAuth(auth: any) {
+    fs.writeFileSync(AUTH_PATH, JSON.stringify(auth, null, 2));
+  }
+
+  function isKeyExhausted(prov: string, idx: number): boolean {
+    const until = cache.exhausted_keys?.[`${prov}:${idx}`];
+    if (!until) return false;
+    if (Date.now() >= until) { delete cache.exhausted_keys![`${prov}:${idx}`]; return false; }
+    return true;
+  }
+
+  function exhaustKey(prov: string, idx: number) {
+    if (!cache.exhausted_keys) cache.exhausted_keys = {};
+    cache.exhausted_keys[`${prov}:${idx}`] = Date.now() + KEY_COOLDOWN;
+    saveCache();
+  }
+
+  /** Try rotating to next available key for provider. Returns true if switched. */
+  function rotateKey(prov: string): boolean {
+    const keys = cfg.providers?.[prov]?.keys;
+    if (!keys || keys.length <= 1) return false;
+    const curIdx = activeKeyIdx[prov] ?? 0;
+    exhaustKey(prov, curIdx);
+    for (let i = 1; i < keys.length; i++) {
+      const nextIdx = (curIdx + i) % keys.length;
+      if (!isKeyExhausted(prov, nextIdx)) {
+        const resolved = resolveKeyValue(keys[nextIdx].key);
+        const auth = loadAuth();
+        if (auth[prov]) {
+          // Update the key/token in auth.json
+          if (auth[prov].key) auth[prov].key = keys[nextIdx].key;
+          else if (auth[prov].type === "api_key") auth[prov].key = keys[nextIdx].key;
+          else auth[prov].key = keys[nextIdx].key; // fallback: set key field
+          saveAuth(auth);
+        }
+        activeKeyIdx[prov] = nextIdx;
+        return true;
+      }
+    }
+    return false; // all keys exhausted
+  }
+
+  function activeKeyLabel(prov: string): string | null {
+    const keys = cfg.providers?.[prov]?.keys;
+    if (!keys || keys.length <= 1) return null;
+    const idx = activeKeyIdx[prov] ?? 0;
+    return keys[idx]?.label ?? `key-${idx}`;
+  }
+
   function costMux(prov: string) { return cache.cost_mux?.[prov] ?? 1; }
 
   function bumpMux(prov: string, modelId: string) {
@@ -214,12 +283,20 @@ export default function (pi: ExtensionAPI) {
     return true;
   }
 
-  function recordLimit(ref: string) {
+  function recordLimit(ref: string): { rotated: boolean; newKey?: string } {
+    const { provider } = splitRef(ref);
+    // Try key rotation first — if we have another key, use it instead of backing off the model
+    if (rotateKey(provider)) {
+      const label = activeKeyLabel(provider) ?? "next";
+      return { rotated: true, newKey: label };
+    }
+    // No keys to rotate — fall back to model-level backoff
     const prev = limits.get(ref);
     const hits = (prev?.hits ?? 0) + 1;
     const ms = BACKOFF[Math.min(hits - 1, BACKOFF.length - 1)];
     limits.set(ref, { cooldown_until: Date.now() + ms, backoff_ms: ms, hits });
-    if (hits === COST_MUX_AT_HIT) { const { provider, modelId } = splitRef(ref); bumpMux(provider, modelId); }
+    if (hits === COST_MUX_AT_HIT) { const { provider: p, modelId } = splitRef(ref); bumpMux(p, modelId); }
+    return { rotated: false };
   }
 
   function recordOk(ref: string) { const e = limits.get(ref); if (e) e.hits = 0; }
@@ -347,10 +424,15 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.on("tool_result", async (ev) => {
+  pi.on("tool_result", async (ev, ctx) => {
     if (ev.isError && curModel) {
       const txt = ev.content?.map((c: any) => c.text ?? "").join("") ?? "";
-      if (txt.includes("429") || txt.toLowerCase().includes("rate limit")) recordLimit(curModel);
+      if (txt.includes("429") || txt.toLowerCase().includes("rate limit")) {
+        const result = recordLimit(curModel);
+        if (result.rotated) {
+          ctx.ui.notify(`🔑 Rate limited — rotated ${splitRef(curModel).provider} to key "${result.newKey}"`, "warning");
+        }
+      }
     }
   });
 
@@ -434,7 +516,12 @@ export default function (pi: ExtensionAPI) {
       const lines = ["Model Router", ""];
       if (provs.size) {
         lines.push("Providers:");
-        for (const p of provs) { const mux = costMux(p); lines.push(`  ${p.padEnd(14)} ${cfg.providers?.[p]?.billing ?? "?"}${mux > 1 ? `  ×${mux}` : ""}`); }
+        for (const p of provs) {
+          const mux = costMux(p);
+          const keys = cfg.providers?.[p]?.keys;
+          const keyInfo = keys && keys.length > 1 ? `  🔑${activeKeyLabel(p) ?? "0"}/${keys.length}` : "";
+          lines.push(`  ${p.padEnd(14)} ${cfg.providers?.[p]?.billing ?? "?"}${mux > 1 ? `  ×${mux}` : ""}${keyInfo}`);
+        }
         lines.push("");
       }
       lines.push("Groups:");

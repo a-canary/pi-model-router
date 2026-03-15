@@ -84,6 +84,29 @@ Replaces `~/.pi/agent/extensions/custom-footer.ts` (disabled to `.disabled`).
 | `resolve_model_group` | Read-only: what would a group resolve to? |
 | `update_model_metrics` | Manual metric override (rarely needed) |
 
+## Multi-key rotation
+
+Providers can have multiple API keys/tokens. On 429, the router tries rotating to the next available key before falling back to model-level backoff.
+
+```jsonc
+"providers": {
+  "anthropic": {
+    "billing": "subscription",
+    "keys": [
+      { "key": "!pass show api/claude/token-1", "label": "primary" },
+      { "key": "!pass show api/claude/token-2", "label": "backup" }
+    ]
+  }
+}
+```
+
+Flow on 429:
+1. Mark current key exhausted (1hr cooldown)
+2. Try next non-exhausted key → update `~/.pi/agent/auth.json` → continue (no model backoff)
+3. If all keys exhausted → normal model backoff + costMux
+
+Keys support `!pass show` syntax for secret resolution.
+
 ## What NOT to add
 
 - Token budget tracking (providers don't expose limits)

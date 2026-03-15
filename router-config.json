@@ -2,7 +2,10 @@
   "providers": {
     "anthropic": {
       "billing": "subscription",
-      "monthly_cost_usd": 200
+      "monthly_cost_usd": 200,
+      "keys": [
+        { "key": "!pass show api/claude/oauth-token", "label": "primary" }
+      ]
     },
     "chutes": {
       "billing": "subscription",
