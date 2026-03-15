@@ -37,6 +37,7 @@ interface Cache {
   benchmarks?: Record<string, number>;
   cost_mux?: Record<string, number>; cost_mux_last_bump?: Record<string, string>;
   exhausted_keys?: Record<string, number>; // "provider:keyIdx" → exhausted_until timestamp
+  openrouter_pricing?: Record<string, { input: number; output: number }>; // normalized model name → $/1M
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -320,11 +321,34 @@ export default function (pi: ExtensionAPI) {
         const models: Cache["available_models"] = [];
         try {
           const d = JSON.parse(execSync(`curl -sL --max-time 20 "https://llm.chutes.ai/v1/models"`, { encoding: "utf-8", maxBuffer: 2e6 }));
-          for (const m of d.data ?? []) models.push({ id: m.id, provider: "chutes", cost_per_m: 0 });
+          const pricing = cache.openrouter_pricing ?? {};
+          for (const m of d.data ?? []) {
+            models.push({ id: m.id, provider: "chutes", cost_per_m: m.pricing?.prompt ?? 0 });
+            // Capture pricing ($/1M tokens)
+            const inp = m.pricing?.prompt ?? 0;
+            const out = m.pricing?.completion ?? 0;
+            if (inp >= 0 && out >= 0) {
+              const n = norm(m.id);
+              if (!pricing[n] || inp < pricing[n].input) pricing[n] = { input: inp, output: out };
+            }
+          }
+          cache.openrouter_pricing = pricing;
         } catch {}
         try {
           const d = JSON.parse(execSync(`curl -sL --max-time 20 "https://openrouter.ai/api/v1/models"`, { encoding: "utf-8", maxBuffer: 5e6 }));
-          for (const m of d.data ?? []) if (String(m.pricing?.prompt ?? "1") === "0") models.push({ id: m.id, provider: "openrouter", cost_per_m: 0 });
+          const pricing: Record<string, { input: number; output: number }> = {};
+          for (const m of d.data ?? []) {
+            // Capture free models for scout
+            if (String(m.pricing?.prompt ?? "1") === "0") models.push({ id: m.id, provider: "openrouter", cost_per_m: 0 });
+            // Capture all pricing (per-token → per-million)
+            const inp = parseFloat(m.pricing?.prompt ?? "0") * 1_000_000;
+            const out = parseFloat(m.pricing?.completion ?? "0") * 1_000_000;
+            if (inp >= 0 && out >= 0) {
+              const n = norm(m.id);
+              if (!pricing[n] || inp < pricing[n].input) pricing[n] = { input: inp, output: out };
+            }
+          }
+          cache.openrouter_pricing = pricing;
         } catch {}
         if (models.length) { cache.available_models = models; cache.models_cached = new Date().toISOString(); }
       }
@@ -456,11 +480,39 @@ export default function (pi: ExtensionAPI) {
 
   function limitSecs(ref: string) { const e = limits.get(ref); return e ? Math.max(0, Math.ceil((e.cooldown_until - Date.now()) / 1000)) : 0; }
 
+  // ── Price lookup (OpenRouter as oracle) ─────────────────────────────────
+
+  function lookupPrice(ref: string): { input: number; output: number } | null {
+    // 1. Check config metrics first
+    const cm = cfg.model_metrics[ref];
+    if (cm?.cost_per_m) return { input: cm.cost_per_m, output: cm.cost_per_m };
+
+    // 2. Check OpenRouter/Chutes pricing cache
+    const { modelId } = splitRef(ref);
+    const n = norm(modelId);
+    if (cache.openrouter_pricing?.[n]) return cache.openrouter_pricing[n];
+
+    // 3. Try partial match
+    for (const [k, v] of Object.entries(cache.openrouter_pricing ?? {})) {
+      if (k.includes(n) || n.includes(k)) return v;
+    }
+    return null;
+  }
+
   // ── Effective cost ─────────────────────────────────────────────────────
 
   function effCost(ref: string): number {
     const m = getM(ref), prov = ref.split("/")[0];
-    let base = m.cost_per_m || 0.01; // tiny base so costMux differentiates free models
+    // 1. Use metrics cost_per_m if set
+    let base = m.cost_per_m;
+    // 2. Look up in OpenRouter/Chutes pricing cache
+    if (!base) {
+      const price = lookupPrice(ref);
+      if (price) base = price.input; // use input price as representative
+    }
+    // 3. Fallback to tiny base (costMux still differentiates free models)
+    if (!base) base = 0.01;
+    // Apply subscription discount
     if (cfg.providers?.[prov]?.billing === "subscription") base *= SUB_DISCOUNT;
     return base * costMux(prov);
   }
@@ -714,20 +766,26 @@ export default function (pi: ExtensionAPI) {
           lines.push("│ (no models configured)");
         } else {
           // Table header
-          lines.push("│ #   Model                           GDP    Lat    TPS    Cost/M   Mux   Status");
-          lines.push("│ ─   ─────────────────────────────   ───    ───    ───    ───────   ───   ──────");
+          lines.push("│ #   Model                           GDP    Lat    TPS    Cost I/O     Mux   Status");
+          lines.push("│ ─   ─────────────────────────────   ───    ───    ───    ──────────   ───   ──────");
 
           for (const { ref, limited, rank } of top) {
             const m = getM(ref);
             const prov = ref.split("/")[0];
             const mux = costMux(prov);
             const cost = effCost(ref);
+            const price = lookupPrice(ref);
             const modelShort = ref.length > 32 ? "…" + ref.slice(-31) : ref;
             const isActive = curModel === ref ? "●" : " ";
             const status = limited ? `⛔${limitSecs(ref)}s` : isActive ? "active" : "";
             const muxStr = mux > 1 ? `×${mux}` : "1";
 
-            lines.push(`│ ${rank + 1}   ${modelShort.padEnd(32)} ${String(m.gdpval).padStart(4)}   ${String(Math.round(m.avg_latency_ms)).padStart(4)}   ${String(Math.round(m.throughput_tps)).padStart(3)}   $${cost.toFixed(2).padStart(6)}   ${muxStr.padStart(3)}   ${status}`);
+            // Show input/output pricing if available
+            const costDisplay = price
+              ? `$${price.input.toFixed(2)}/$${price.output.toFixed(2)}`
+              : `$${cost.toFixed(2)}/M`;
+
+            lines.push(`│ ${rank + 1}   ${modelShort.padEnd(32)} ${String(m.gdpval).padStart(4)}   ${String(Math.round(m.avg_latency_ms)).padStart(4)}   ${String(Math.round(m.throughput_tps)).padStart(3)}   ${costDisplay.padStart(12)}   ${muxStr.padStart(3)}   ${status}`);
           }
         }
         lines.push("│");
