@@ -789,6 +789,7 @@ export default function (pi: ExtensionAPI) {
 
       pi.registerProvider(groupName, {
         baseUrl: "https://router.local", // not used — streamSimple overrides
+        apiKey: "router-virtual",        // not used — streamSimple overrides
         api: "openai-completions",       // not used — streamSimple overrides
         streamSimple: groupStream,
         models: [{
