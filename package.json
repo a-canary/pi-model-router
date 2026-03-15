@@ -4,6 +4,10 @@
   "description": "Pi extension that routes model groups to concrete models. Balances intelligence, cost, and availability.",
   "type": "module",
   "main": "index.ts",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
   "keywords": ["pi", "pi-extension", "model-router", "llm", "ai"],
   "author": "Aaron Canary",
   "license": "MIT",
@@ -22,5 +26,8 @@
     "@mariozechner/pi-ai": "*",
     "@mariozechner/pi-tui": "*",
     "@sinclair/typebox": "*"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.0"
   }
 }
