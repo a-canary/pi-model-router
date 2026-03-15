@@ -51,7 +51,7 @@ const GDPVAL_BUILTIN: Record<string, number> = {
   "glm-5": 1418, "glm-4.7": 1209, "glm-4.6": 1046, "kimi-k2.5": 1291,
   "minimax-m2.5": 1215, "minimax-m2": 1057, "mimo-v2-flash": 1115,
   "qwen3.5-397b": 1258, "qwen3.5-27b": 1208, "qwen3-coder-next": 944,
-  "qwen3-235b-a22b": 840, "qwen3-32b": 540,
+  "qwen3-235b-a22b": 840, "qwen3-32b": 540, "qwen3-coder-plus": 944, "qwen3-coder-flash": 800,
   "deepseek-v3.2": 1202, "deepseek-v3.1": 1116, "deepseek-v3": 470, "deepseek-r1-0528": 712,
   "mistral-large-3": 893, "mistral-small-3.1": 386,
   "gpt-oss-120b": 971, "gpt-oss-20b": 694,

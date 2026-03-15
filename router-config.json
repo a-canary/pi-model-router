@@ -13,6 +13,9 @@
     },
     "openrouter": {
       "billing": "pay_per_token"
+    },
+    "qwen-cli": {
+      "billing": "subscription"
     }
   },
 
@@ -46,7 +49,8 @@
         "chutes/MiniMaxAI/MiniMax-M2.5-TEE",
         "chutes/moonshotai/Kimi-K2.5-TEE",
         "chutes/openai/gpt-oss-120b-TEE",
-        "openrouter/qwen/qwen3.5-397b:free"
+        "openrouter/qwen/qwen3.5-397b:free",
+        "qwen-cli/qwen3-coder-plus"
       ]
     },
     "operational": {
@@ -67,7 +71,9 @@
         "chutes/XiaomiMiMo/MiMo-V2-Flash-TEE",
         "openrouter/qwen/qwen3.5-397b:free",
         "openrouter/qwen/qwen3-coder:free",
-        "openrouter/meta-llama/llama-3.3-70b-instruct:free"
+        "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+        "qwen-cli/qwen3-coder-plus",
+        "qwen-cli/qwen3-coder-flash"
       ]
     },
     "scout": {
@@ -87,7 +93,9 @@
         "openrouter/qwen/qwen3-coder:free",
         "openrouter/meta-llama/llama-3.3-70b-instruct:free",
         "openrouter/deepseek/deepseek-v3-0324:free",
-        "openrouter/mistralai/mistral-small-3.1-24b-instruct:free"
+        "openrouter/mistralai/mistral-small-3.1-24b-instruct:free",
+        "qwen-cli/qwen3-coder-plus",
+        "qwen-cli/qwen3-coder-flash"
       ]
     },
     "fallback": {
@@ -96,7 +104,8 @@
       "models": [
         "anthropic/claude-opus-4-6-20250514",
         "chutes/zai-org/GLM-5-TEE",
-        "openrouter/qwen/qwen3.5-397b:free"
+        "openrouter/qwen/qwen3.5-397b:free",
+        "qwen-cli/qwen3-coder-plus"
       ]
     }
   },
@@ -171,6 +180,18 @@
       "gdpval": 386,
       "throughput_tps": 220,
       "avg_latency_ms": 400
+    },
+    "qwen-cli/qwen3-coder-plus": {
+      "gdpval": 944,
+      "throughput_tps": 120,
+      "avg_latency_ms": 1000,
+      "cost_per_m": 0
+    },
+    "qwen-cli/qwen3-coder-flash": {
+      "gdpval": 800,
+      "throughput_tps": 200,
+      "avg_latency_ms": 500,
+      "cost_per_m": 0
     }
   }
 }
