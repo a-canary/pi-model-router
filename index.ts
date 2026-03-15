@@ -38,6 +38,7 @@ interface Cache {
   cost_mux?: Record<string, number>; cost_mux_last_bump?: Record<string, string>;
   exhausted_keys?: Record<string, number>; // "provider:keyIdx" → exhausted_until timestamp
   openrouter_pricing?: Record<string, { input: number; output: number }>; // normalized model name → $/1M
+  usage_log?: { ref: string; tokens: number; ts: number }[]; // token usage history
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -107,6 +108,11 @@ const STRIP_PRE = ["chutesai/","deepseek-ai/","qwen/","moonshotai/","zai-org/","
 const STRIP_SUF = ["-tee",":free",":api","-instruct","-thinking","-chat","-reasoning",
   "-fp8","-preview","-2507","-0324","-0528"];
 
+function stripDateSuffix(s: string): string {
+  // Strip trailing -YYYYMMDD or -YYMMDD patterns (e.g., -20250514)
+  return s.replace(/-\d{6,8}$/, "");
+}
+
 // ── Extension ──────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
@@ -132,6 +138,7 @@ export default function (pi: ExtensionAPI) {
     s = s.toLowerCase();
     for (const p of STRIP_PRE) s = s.replace(p, "");
     for (const x of STRIP_SUF) s = s.replace(x, "");
+    s = stripDateSuffix(s);
     return s.replace(/[^a-z0-9]/g, "");
   }
 
@@ -480,6 +487,24 @@ export default function (pi: ExtensionAPI) {
 
   function limitSecs(ref: string) { const e = limits.get(ref); return e ? Math.max(0, Math.ceil((e.cooldown_until - Date.now()) / 1000)) : 0; }
 
+  // ── Usage Stats ────────────────────────────────────────────────────────
+
+  function getUsage(ref: string, days: number): number {
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+    return (cache.usage_log ?? [])
+      .filter(e => e.ref === ref && e.ts > cutoff)
+      .reduce((sum, e) => sum + e.tokens, 0);
+  }
+
+  function getUsageAll(days: number): Record<string, number> {
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+    const result: Record<string, number> = {};
+    for (const e of cache.usage_log ?? []) {
+      if (e.ts > cutoff) result[e.ref] = (result[e.ref] ?? 0) + e.tokens;
+    }
+    return result;
+  }
+
   // ── Price lookup (OpenRouter as oracle) ─────────────────────────────────
 
   function lookupPrice(ref: string): { input: number; output: number } | null {
@@ -658,7 +683,16 @@ export default function (pi: ExtensionAPI) {
     if (msg?.role === "assistant") {
       const txt = typeof msg.content === "string" ? msg.content : (msg.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("");
       const tok = Math.ceil(txt.length / 4);
-      if (tok > 0) { updateMetrics(curModel, ms, tok, ms); recordOk(curModel); }
+      if (tok > 0) {
+        updateMetrics(curModel, ms, tok, ms);
+        recordOk(curModel);
+        // Log usage
+        if (!cache.usage_log) cache.usage_log = [];
+        cache.usage_log.push({ ref: curModel, tokens: tok, ts: Date.now() });
+        // Trim log to last 30 days
+        const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+        cache.usage_log = cache.usage_log.filter(e => e.ts > cutoff);
+      }
     }
   });
 
@@ -766,8 +800,8 @@ export default function (pi: ExtensionAPI) {
           lines.push("│ (no models configured)");
         } else {
           // Table header
-          lines.push("│ #   Model                           GDP    Lat    TPS    Cost I/O     Mux   Status");
-          lines.push("│ ─   ─────────────────────────────   ───    ───    ───    ──────────   ───   ──────");
+          lines.push("│ #   Model                           GDP   Lat   TPS   Cost I/O       Usage 1d/7d/30d    Status");
+          lines.push("│ ─   ─────────────────────────────   ───   ───   ───   ───────────    ─────────────────   ──────");
 
           for (const { ref, limited, rank } of top) {
             const m = getM(ref);
@@ -778,14 +812,20 @@ export default function (pi: ExtensionAPI) {
             const modelShort = ref.length > 32 ? "…" + ref.slice(-31) : ref;
             const isActive = curModel === ref ? "●" : " ";
             const status = limited ? `⛔${limitSecs(ref)}s` : isActive ? "active" : "";
-            const muxStr = mux > 1 ? `×${mux}` : "1";
 
             // Show input/output pricing if available
             const costDisplay = price
-              ? `$${price.input.toFixed(2)}/$${price.output.toFixed(2)}`
-              : `$${cost.toFixed(2)}/M`;
+              ? `$${price.input.toFixed(1)}/$${price.output.toFixed(1)}`
+              : `$${cost.toFixed(1)}`;
 
-            lines.push(`│ ${rank + 1}   ${modelShort.padEnd(32)} ${String(m.gdpval).padStart(4)}   ${String(Math.round(m.avg_latency_ms)).padStart(4)}   ${String(Math.round(m.throughput_tps)).padStart(3)}   ${costDisplay.padStart(12)}   ${muxStr.padStart(3)}   ${status}`);
+            // Usage: 1d/7d/30d tokens (compact format)
+            const u1 = getUsage(ref, 1), u7 = getUsage(ref, 7), u30 = getUsage(ref, 30);
+            const usageDisplay = `${fmt(u1)}/${fmt(u7)}/${fmt(u30)}`;
+
+            // Highlight if has mux
+            const muxDisplay = mux > 1 ? `×${mux} ` : "";
+
+            lines.push(`│ ${rank + 1}   ${modelShort.padEnd(32)} ${String(m.gdpval).padStart(3)}  ${String(Math.round(m.avg_latency_ms)).padStart(4)}  ${String(Math.round(m.throughput_tps)).padStart(3)}   ${costDisplay.padStart(10)}     ${usageDisplay.padStart(15)}     ${muxDisplay}${status}`);
           }
         }
         lines.push("│");
