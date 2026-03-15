@@ -1,0 +1,173 @@
+{
+  "providers": {
+    "anthropic": {
+      "billing": "subscription",
+      "monthly_cost_usd": 200
+    },
+    "chutes": {
+      "billing": "subscription",
+      "monthly_cost_usd": 100
+    },
+    "openrouter": {
+      "billing": "pay_per_token"
+    }
+  },
+
+  "model_groups": {
+    "strategic": {
+      "description": "Best 2 models by intelligence, then cheapest",
+      "method": "pipeline",
+      "pipeline": [
+        { "method": "max_gdpval", "top_k": 2 },
+        { "method": "min_cost", "top_k": 1 }
+      ],
+      "models": [
+        "anthropic/claude-opus-4-6-20250514",
+        "chutes/zai-org/GLM-5-TEE",
+        "chutes/MiniMaxAI/MiniMax-M2.5-TEE",
+        "chutes/moonshotai/Kimi-K2.5-TEE",
+        "openrouter/qwen/qwen3.5-397b:free"
+      ]
+    },
+    "tactical": {
+      "description": "Top 4 by intelligence, then cheapest",
+      "method": "pipeline",
+      "pipeline": [
+        { "method": "max_gdpval", "top_k": 4 },
+        { "method": "min_cost", "top_k": 1 }
+      ],
+      "models": [
+        "anthropic/claude-opus-4-6-20250514",
+        "anthropic/claude-sonnet-4-5-20250514",
+        "chutes/zai-org/GLM-5-TEE",
+        "chutes/MiniMaxAI/MiniMax-M2.5-TEE",
+        "chutes/moonshotai/Kimi-K2.5-TEE",
+        "chutes/openai/gpt-oss-120b-TEE",
+        "openrouter/qwen/qwen3.5-397b:free"
+      ]
+    },
+    "operational": {
+      "description": "Top 8 by intelligence, then cheapest",
+      "method": "pipeline",
+      "pipeline": [
+        { "method": "max_gdpval", "top_k": 8 },
+        { "method": "min_cost", "top_k": 1 }
+      ],
+      "models": [
+        "anthropic/claude-sonnet-4-5-20250514",
+        "anthropic/claude-haiku-3-5-20241022",
+        "chutes/zai-org/GLM-5-TEE",
+        "chutes/zai-org/GLM-5-Turbo",
+        "chutes/MiniMaxAI/MiniMax-M2.5-TEE",
+        "chutes/moonshotai/Kimi-K2.5-TEE",
+        "chutes/openai/gpt-oss-120b-TEE",
+        "chutes/XiaomiMiMo/MiMo-V2-Flash-TEE",
+        "openrouter/qwen/qwen3.5-397b:free",
+        "openrouter/qwen/qwen3-coder:free",
+        "openrouter/meta-llama/llama-3.3-70b-instruct:free"
+      ]
+    },
+    "scout": {
+      "description": "Top 16 by intelligence, then cheapest — exploration",
+      "method": "pipeline",
+      "pipeline": [
+        { "method": "max_gdpval", "top_k": 16 },
+        { "method": "min_cost", "top_k": 1 }
+      ],
+      "filter_free": true,
+      "models": [
+        "chutes/zai-org/GLM-5-Turbo",
+        "chutes/MiniMaxAI/MiniMax-M2.5-TEE",
+        "chutes/openai/gpt-oss-120b-TEE",
+        "chutes/XiaomiMiMo/MiMo-V2-Flash-TEE",
+        "openrouter/qwen/qwen3.5-397b:free",
+        "openrouter/qwen/qwen3-coder:free",
+        "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+        "openrouter/deepseek/deepseek-v3-0324:free",
+        "openrouter/mistralai/mistral-small-3.1-24b-instruct:free"
+      ]
+    },
+    "fallback": {
+      "description": "Simple ordered failover chain",
+      "method": "failover",
+      "models": [
+        "anthropic/claude-opus-4-6-20250514",
+        "chutes/zai-org/GLM-5-TEE",
+        "openrouter/qwen/qwen3.5-397b:free"
+      ]
+    }
+  },
+
+  "model_metrics": {
+    "anthropic/claude-opus-4-6-20250514": {
+      "gdpval": 1450,
+      "throughput_tps": 80,
+      "avg_latency_ms": 2000
+    },
+    "anthropic/claude-sonnet-4-5-20250514": {
+      "gdpval": 1380,
+      "throughput_tps": 150,
+      "avg_latency_ms": 800
+    },
+    "anthropic/claude-haiku-3-5-20241022": {
+      "gdpval": 1100,
+      "throughput_tps": 300,
+      "avg_latency_ms": 300
+    },
+    "chutes/zai-org/GLM-5-TEE": {
+      "gdpval": 1418,
+      "throughput_tps": 120,
+      "avg_latency_ms": 1500
+    },
+    "chutes/zai-org/GLM-5-Turbo": {
+      "gdpval": 1046,
+      "throughput_tps": 250,
+      "avg_latency_ms": 400
+    },
+    "chutes/MiniMaxAI/MiniMax-M2.5-TEE": {
+      "gdpval": 1215,
+      "throughput_tps": 180,
+      "avg_latency_ms": 600
+    },
+    "chutes/moonshotai/Kimi-K2.5-TEE": {
+      "gdpval": 1291,
+      "throughput_tps": 140,
+      "avg_latency_ms": 1000
+    },
+    "chutes/openai/gpt-oss-120b-TEE": {
+      "gdpval": 971,
+      "throughput_tps": 200,
+      "avg_latency_ms": 500
+    },
+    "chutes/XiaomiMiMo/MiMo-V2-Flash-TEE": {
+      "gdpval": 1115,
+      "throughput_tps": 350,
+      "avg_latency_ms": 200
+    },
+    "openrouter/qwen/qwen3.5-397b:free": {
+      "gdpval": 1258,
+      "throughput_tps": 100,
+      "avg_latency_ms": 1200
+    },
+    "openrouter/qwen/qwen3-coder:free": {
+      "gdpval": 944,
+      "throughput_tps": 150,
+      "avg_latency_ms": 800
+    },
+    "openrouter/meta-llama/llama-3.3-70b-instruct:free": {
+      "gdpval": 453,
+      "throughput_tps": 200,
+      "avg_latency_ms": 500
+    },
+    "openrouter/deepseek/deepseek-v3-0324:free": {
+      "gdpval": 470,
+      "throughput_tps": 180,
+      "avg_latency_ms": 600
+    },
+    "openrouter/mistralai/mistral-small-3.1-24b-instruct:free": {
+      "gdpval": 386,
+      "throughput_tps": 220,
+      "avg_latency_ms": 400
+    }
+  }
+}

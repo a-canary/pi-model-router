@@ -1,0 +1,26 @@
+{
+  "name": "pi-model-router",
+  "version": "1.0.0",
+  "description": "Pi extension that routes model groups to concrete models. Balances intelligence, cost, and availability.",
+  "type": "module",
+  "main": "index.ts",
+  "keywords": ["pi", "pi-extension", "model-router", "llm", "ai"],
+  "author": "Aaron Canary",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/a-canary/pi-model-router.git"
+  },
+  "files": [
+    "index.ts",
+    "router-config.json",
+    "PI.md",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  }
+}
