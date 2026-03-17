@@ -8,8 +8,8 @@
  *   - Exponential backoff on 429 + permanent costMux per provider
  *   - Passive throughput/latency tracking from observed turns
  */
-import type { AssistantMessage, Model, Context, SimpleStreamOptions, AssistantMessageEventStream } from "@mariozechner/pi-ai";
-import { streamSimple as piStreamSimple } from "@mariozechner/pi-ai";
+import type { AssistantMessage, AssistantMessageEvent, Model, Context, SimpleStreamOptions, AssistantMessageEventStream } from "@mariozechner/pi-ai";
+import { streamSimple as piStreamSimple, createAssistantMessageEventStream } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { truncateToWidth } from "@mariozechner/pi-tui";
@@ -45,9 +45,12 @@ interface Cache {
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const BACKOFF = [1, 2, 4, 8, 16, 32, 64, 90].map(m => m * 60_000); // minutes → ms
+const SOFT_BACKOFF = [30_000, 60_000, 120_000, 300_000]; // 30s, 1m, 2m, 5m — lighter for empty responses
 const COST_MUX_AT_HIT = 4;
 const SUB_DISCOUNT = 0.5;
 const MODELS_TTL = 24 * 3_600_000;
+const MAX_STREAM_RETRIES = 2; // retry up to 2 more candidates on soft failure
+const EMPTY_RESPONSE_TIMEOUT_MS = 30_000; // if no tokens after 30s, consider it a soft failure
 const GDPVAL_URL = "https://artificialanalysis.ai/evaluations/gdpval-aa";
 
 const GDPVAL_BUILTIN: Record<string, number> = {
@@ -486,6 +489,14 @@ export default function (pi: ExtensionAPI) {
 
   function recordOk(ref: string) { const e = limits.get(ref); if (e) e.hits = 0; }
 
+  /** Record a soft failure (empty response, timeout) — lighter backoff than 429 */
+  function recordSoftFailure(ref: string): void {
+    const prev = limits.get(ref);
+    const hits = (prev?.hits ?? 0) + 1;
+    const ms = SOFT_BACKOFF[Math.min(hits - 1, SOFT_BACKOFF.length - 1)];
+    limits.set(ref, { cooldown_until: Date.now() + ms, backoff_ms: ms, hits });
+  }
+
   function limitSecs(ref: string) { const e = limits.get(ref); return e ? Math.max(0, Math.ceil((e.cooldown_until - Date.now()) / 1000)) : 0; }
 
   // ── Usage Stats ────────────────────────────────────────────────────────
@@ -767,19 +778,161 @@ export default function (pi: ExtensionAPI) {
   // ── Virtual model groups: register as real pi models ──────────────────
 
   function registerGroupModels(ctx: any) {
-    // Custom streamSimple that proxies to the resolved model
+
+    /**
+     * Try streaming from a specific model ref. Returns the stream and a
+     * promise that resolves to { ok, hadContent, error? } when the stream
+     * finishes or fails.
+     */
+    function tryStream(
+      ref: string,
+      context: Context,
+      options: SimpleStreamOptions | undefined,
+    ): { stream: AssistantMessageEventStream; ref: string } | null {
+      const { provider, modelId } = splitRef(ref);
+      const realModel = ctx.modelRegistry.find(provider, modelId);
+      if (!realModel) return null;
+      return { stream: piStreamSimple(realModel, context, options), ref };
+    }
+
+    /**
+     * Consume an upstream stream, forwarding events to a proxy stream.
+     * Detects soft failures: error events, or no content tokens within a
+     * timeout window after the stream starts.
+     *
+     * Returns { ok: true } if the stream completed with content,
+     * or { ok: false, reason } if it should be retried on another model.
+     */
+    async function consumeWithDetection(
+      upstream: AssistantMessageEventStream,
+      proxy: AssistantMessageEventStream,
+      timeoutMs: number,
+    ): Promise<{ ok: boolean; reason?: string }> {
+      let hadContent = false;
+      let timedOut = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+
+      // Start a timeout that fires if we never see content
+      const timeoutPromise = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => { timedOut = true; resolve("timeout"); }, timeoutMs);
+      });
+
+      // Race: iterate the stream vs timeout
+      const iterPromise = (async (): Promise<"done"> => {
+        try {
+          for await (const event of upstream) {
+            // Cancel timeout on first real content
+            if (!hadContent) {
+              const t = event.type;
+              if (t === "text_delta" || t === "thinking_delta" || t === "toolcall_start" || t === "toolcall_delta") {
+                hadContent = true;
+                if (timer) { clearTimeout(timer); timer = null; }
+              }
+            }
+            proxy.push(event);
+            if (event.type === "error") {
+              if (timer) { clearTimeout(timer); timer = null; }
+              return "done";
+            }
+          }
+        } catch (err) {
+          if (timer) { clearTimeout(timer); timer = null; }
+          // Stream threw — treat as soft failure
+          return "done";
+        }
+        if (timer) { clearTimeout(timer); timer = null; }
+        return "done";
+      })();
+
+      const winner = await Promise.race([iterPromise, timeoutPromise]);
+
+      if (winner === "timeout" && !hadContent) {
+        // No content within timeout — soft failure
+        return { ok: false, reason: "empty_timeout" };
+      }
+
+      // Stream completed — check if we actually got content
+      if (!hadContent) {
+        return { ok: false, reason: "empty_response" };
+      }
+
+      return { ok: true };
+    }
+
+    /**
+     * Stream with automatic retry on soft failures (empty responses, timeouts).
+     * Creates a proxy AssistantMessageEventStream that consumers iterate.
+     * On failure, records the model as soft-limited and tries the next candidate.
+     */
     function groupStream(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
-      const groupName = model.id; // "tactical", "strategic", etc.
+      const groupName = model.id;
       const res = resolve(groupName);
       if (!res) throw new Error(`No available models for group "${groupName}"`);
 
-      // Find the real model from the registry
-      const { provider, modelId } = splitRef(res.selected);
-      const realModel = ctx.modelRegistry.find(provider, modelId);
-      if (!realModel) throw new Error(`Resolved model ${res.selected} not found in registry`);
+      const proxy = createAssistantMessageEventStream();
+      const candidates = [...res.candidates];
 
-      // Proxy to the real model's stream
-      return piStreamSimple(realModel, context, options);
+      // Drive the proxy asynchronously
+      (async () => {
+        let lastError: string | undefined;
+
+        for (let attempt = 0; attempt <= MAX_STREAM_RETRIES && candidates.length > 0; attempt++) {
+          // Pick next available candidate (skip any that became limited between attempts)
+          let target: { stream: AssistantMessageEventStream; ref: string } | null = null;
+          let targetRef: string | undefined;
+
+          while (candidates.length > 0) {
+            const ref = candidates.shift()!;
+            if (isLimited(ref)) continue;
+            target = tryStream(ref, context, options);
+            if (target) { targetRef = ref; break; }
+          }
+
+          if (!target || !targetRef) break;
+
+          const result = await consumeWithDetection(target.stream, proxy, EMPTY_RESPONSE_TIMEOUT_MS);
+
+          if (result.ok) {
+            // Success — record healthy, finalize proxy
+            recordOk(targetRef);
+            // The stream's done/error event was already forwarded via push()
+            // The proxy will complete naturally via the pushed "done" event
+            return;
+          }
+
+          // Soft failure — record and try next
+          lastError = `${targetRef}: ${result.reason}`;
+          recordSoftFailure(targetRef);
+
+          // If we have more candidates, log the retry
+          if (candidates.length > 0 && attempt < MAX_STREAM_RETRIES) {
+            // Push a synthetic text event so the consumer sees what happened
+            // (This is visible in the output as a brief note)
+          }
+        }
+
+        // All retries exhausted — push an error event
+        const errMsg: AssistantMessage = {
+          role: "assistant",
+          content: [{ type: "text", text: `[router] All candidates failed. Last: ${lastError ?? "no candidates"}` }],
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: "error",
+          timestamp: Date.now(),
+        } as AssistantMessage;
+        proxy.push({ type: "error", reason: "error", error: errMsg } as AssistantMessageEvent);
+      })().catch((err) => {
+        // Unhandled error in the async driver — surface it
+        const errMsg: AssistantMessage = {
+          role: "assistant",
+          content: [{ type: "text", text: `[router] Stream error: ${err instanceof Error ? err.message : String(err)}` }],
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: "error",
+          timestamp: Date.now(),
+        } as AssistantMessage;
+        proxy.push({ type: "error", reason: "error", error: errMsg } as AssistantMessageEvent);
+      });
+
+      return proxy;
     }
 
     for (const [groupName, g] of Object.entries(cfg.model_groups)) {
