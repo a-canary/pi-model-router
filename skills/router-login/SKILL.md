@@ -41,8 +41,8 @@ Guide based on provider type:
 For CLI-auth providers (qwen-cli, gemini-cli):
 - These use OAuth via their CLI tools, not API keys
 - Auth is stored in `~/.qwen/oauth_creds.json` or `~/.gemini/oauth_creds.json`
-- Run `qwen auth login` or `gemini auth login` to authenticate
-- Tokens expire and need periodic refresh
+- First-time setup: run `qwen auth login` or `gemini auth login`
+- Tokens auto-refresh via the refresh_token when the CLI runs — no manual re-auth needed
 
 For providers not listed, ask the user for:
 1. The API key

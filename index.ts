@@ -423,6 +423,17 @@ export default function (pi: ExtensionAPI) {
       try { return execSync(key.slice(1), { encoding: "utf-8" }).trim(); }
       catch { return key; }
     }
+    if (key.startsWith("__cli_oauth__:")) {
+      // Format: __cli_oauth__:/path/to/creds.json:tokenField
+      const parts = key.slice("__cli_oauth__:".length);
+      const lastColon = parts.lastIndexOf(":");
+      const filePath = parts.slice(0, lastColon);
+      const field = parts.slice(lastColon + 1);
+      try {
+        const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+        if (data[field]) return data[field];
+      } catch { /* unreadable */ }
+    }
     return key;
   }
 
