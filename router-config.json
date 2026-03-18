@@ -25,24 +25,24 @@
       "method": "best"
     },
     "tactical": {
-      "description": "Top 25% quality, cheapest by billing preference",
+      "description": "GDPval ≥1100, cheapest by billing preference",
       "method": "tiered",
-      "min_gdpval_pct": 75
+      "min_gdpval": 1100
     },
     "operational": {
-      "description": "Top 50% quality, cheapest by billing preference",
+      "description": "GDPval ≥1000, cheapest by billing preference",
       "method": "tiered",
-      "min_gdpval_pct": 50
+      "min_gdpval": 1000
     },
     "scout": {
-      "description": "Top 25% quality, cheapest by billing preference",
+      "description": "GDPval ≥800, cheapest by billing preference",
       "method": "tiered",
-      "min_gdpval_pct": 25
+      "min_gdpval": 800
     },
     "fallback": {
-      "description": "Any available model, cheapest by billing preference",
+      "description": "GDPval ≥620, cheapest by billing preference",
       "method": "tiered",
-      "min_gdpval_pct": 0
+      "min_gdpval": 620
     }
   },
 

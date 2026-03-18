@@ -23,7 +23,7 @@ import { homedir } from "node:os";
 interface Metrics { gdpval: number; throughput_tps: number; avg_latency_ms: number; cost_per_m: number; last_updated: number; }
 interface RateLimit { cooldown_until: number; backoff_ms: number; hits: number; }
 interface PipeStep { method: string; top_k?: number; }
-interface Group { description?: string; method: string; top_k?: number; pipeline?: PipeStep[]; models?: string[]; filter_free?: boolean; min_gdpval_pct?: number; }
+interface Group { description?: string; method: string; top_k?: number; pipeline?: PipeStep[]; models?: string[]; filter_free?: boolean; min_gdpval_pct?: number; min_gdpval?: number; }
 interface ProviderKey { key: string; label?: string; }
 interface ProviderConfig { billing: string; monthly_cost_usd?: number; keys?: ProviderKey[]; }
 interface Config {
@@ -417,7 +417,13 @@ export default function (pi: ExtensionAPI) {
             } catch { /* provider scan failed, non-fatal */ }
           });
         await Promise.allSettled(providerScans);
-        if (models.length) { cache.available_models = models; cache.models_cached = new Date().toISOString(); }
+        if (models.length) {
+          // Merge: keep existing entries for providers not scanned (or whose scan failed)
+          const scannedProviders = new Set(models.map(m => m.provider));
+          const kept = (cache.available_models ?? []).filter(m => !scannedProviders.has(m.provider));
+          cache.available_models = [...kept, ...models];
+          cache.models_cached = new Date().toISOString();
+        }
       }
       saveCache();
     } finally { scanning = false; }
@@ -686,6 +692,13 @@ export default function (pi: ExtensionAPI) {
     return refs.filter(r => getM(r).gdpval >= threshold);
   }
 
+  /** Filter by absolute minimum gdpval score. Falls back to all refs if none qualify. */
+  function filterByQualityMin(refs: string[], min: number): string[] {
+    if (!refs.length || min <= 0) return refs;
+    const filtered = refs.filter(r => getM(r).gdpval >= min);
+    return filtered.length ? filtered : refs;
+  }
+
   /**
    * Sort by billing preference: free → subscription (by rate-limit pressure & cost) → local → PAYG (by cost)
    * Within each tier, sort by effective cost. Subscription also considers rate-limit pressure.
@@ -705,7 +718,8 @@ export default function (pi: ExtensionAPI) {
 
   function available(g: Group) {
     let c = allDiscoveredRefs();
-    if (g.min_gdpval_pct != null) c = filterByQualityPct(c, g.min_gdpval_pct);
+    if (g.min_gdpval != null) c = filterByQualityMin(c, g.min_gdpval);
+    else if (g.min_gdpval_pct != null) c = filterByQualityPct(c, g.min_gdpval_pct);
     return filterAvailable(c);
   }
 
@@ -713,7 +727,7 @@ export default function (pi: ExtensionAPI) {
     const s = [...models];
     if (method === "min_latency") return s.sort((a, b) => getM(a).avg_latency_ms - getM(b).avg_latency_ms);
     if (method === "max_throughput") return s.sort((a, b) => getM(b).throughput_tps - getM(a).throughput_tps);
-    if (method === "min_cost") return s.sort((a, b) => effCost(a) - effCost(b));
+    if (method === "min_cost") return s.sort((a, b) => effCost(a) - effCost(b) || getM(b).gdpval - getM(a).gdpval);
     if (method === "max_gdpval") return s.sort((a, b) => getM(b).gdpval - getM(a).gdpval);
     if (method === "billing_preference") return sortByBillingPreference(s);
     if (method === "roundrobin") return s;
@@ -758,7 +772,8 @@ export default function (pi: ExtensionAPI) {
     const g = cfg.model_groups[groupName];
     if (!g) return [];
     let c = allDiscoveredRefs();
-    if (g.min_gdpval_pct != null) c = filterByQualityPct(c, g.min_gdpval_pct);
+    if (g.min_gdpval != null) c = filterByQualityMin(c, g.min_gdpval);
+    else if (g.min_gdpval_pct != null) c = filterByQualityPct(c, g.min_gdpval_pct);
 
     if (g.method === "best") {
       c = sortBy(c, "max_gdpval");
@@ -1219,7 +1234,7 @@ export default function (pi: ExtensionAPI) {
         const method = g.method === "pipeline"
           ? g.pipeline!.map(s => `${s.method}${s.top_k ? `:${s.top_k}` : ""}`).join(" → ")
           : g.method === "best" ? "best gdpval"
-          : g.method === "tiered" ? `tiered ≥${g.min_gdpval_pct ?? 0}%`
+          : g.method === "tiered" ? (g.min_gdpval != null ? `tiered ≥${g.min_gdpval}` : `tiered ≥${g.min_gdpval_pct ?? 0}%`)
           : g.method;
         const active = curModel && allDiscoveredRefs().includes(curModel);
         const activeMarker = active ? " ◀" : "";
