@@ -4,6 +4,10 @@
   "description": "Pi extension that routes model groups to concrete models. Balances intelligence, cost, and availability.",
   "type": "module",
   "main": "index.ts",
+  "pi": {
+    "extensions": ["./index.ts"],
+    "skills": ["./skills"]
+  },
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest"

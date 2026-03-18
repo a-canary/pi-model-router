@@ -139,6 +139,7 @@ export default function (pi: ExtensionAPI) {
   let sessionStart = Date.now();
   let turnStart = 0;
   let curModel = "";
+  let sessionCtx: any = null;
 
   // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -649,6 +650,21 @@ export default function (pi: ExtensionAPI) {
     return 3; // pay per token
   }
 
+  /** Check provider key health: "valid" if key exists and not exhausted, "exhausted" if all keys spent, "unchecked" if no keys configured */
+  function providerKeyHealth(prov: string): "valid" | "exhausted" | "unchecked" {
+    const keys = cfg.providers?.[prov]?.keys;
+    if (!keys || keys.length === 0) return "unchecked";
+    const idx = activeKeyIdx[prov] ?? 0;
+    if (isKeyExhausted(prov, idx)) {
+      // Check if any key is available
+      for (let i = 0; i < keys.length; i++) {
+        if (!isKeyExhausted(prov, i)) return "valid";
+      }
+      return "exhausted";
+    }
+    return "valid";
+  }
+
   /** Filter to available models (not rate-limited, healthy provider keys) */
   function filterAvailable(refs: string[]): string[] {
     return refs.filter(r => {
@@ -776,11 +792,42 @@ export default function (pi: ExtensionAPI) {
     return null;
   }
 
+  /**
+   * Register virtual providers for each model group (strategic, tactical, etc).
+   * Called synchronously during extension load so groups are available for
+   * --model resolution before session_start fires.
+   */
+  function registerGroupProviders() {
+    for (const [groupName] of Object.entries(cfg.model_groups)) {
+      const res = resolve(groupName);
+      const resolvedRef = res?.selected ?? "none";
+      const resolvedMetrics = res ? getM(resolvedRef) : null;
+
+      pi.registerProvider(groupName, {
+        baseUrl: "https://router.local", // not used — streamSimple overrides
+        apiKey: "router-virtual",        // not used — streamSimple overrides
+        api: "openai-completions",       // not used — streamSimple overrides
+        streamSimple: groupStream,
+        models: [{
+          id: groupName,
+          name: `${groupName} → ${resolvedRef}`,
+          reasoning: true,
+          input: ["text", "image"] as any,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: resolvedMetrics ? 200_000 : 128_000,
+          maxTokens: 64_000,
+        }],
+      });
+    }
+  }
+
   // ── Events ─────────────────────────────────────────────────────────────
 
   load(); loadCache();
+  registerGroupProviders();
 
   pi.on("session_start", async (_ev, ctx) => {
+    sessionCtx = ctx;
     load(); loadCache(); sessionStart = Date.now();
     discoverKeys();
     registerGroupModels(ctx);
@@ -916,94 +963,95 @@ export default function (pi: ExtensionAPI) {
 
   // ── Virtual model groups: register as real pi models ──────────────────
 
-  function registerGroupModels(ctx: any) {
+  // ── Streaming helpers (hoisted for early group registration) ─────────
 
-    /**
-     * Try streaming from a specific model ref. Returns the stream and a
-     * promise that resolves to { ok, hadContent, error? } when the stream
-     * finishes or fails.
-     */
-    function tryStream(
-      ref: string,
-      context: Context,
-      options: SimpleStreamOptions | undefined,
-    ): { stream: AssistantMessageEventStream; ref: string } | null {
-      const { provider, modelId } = splitRef(ref);
-      const realModel = ctx.modelRegistry.find(provider, modelId);
-      if (!realModel) return null;
-      return { stream: piStreamSimple(realModel, context, options), ref };
-    }
+  /**
+   * Try streaming from a specific model ref. Returns the stream and a
+   * promise that resolves to { ok, hadContent, error? } when the stream
+   * finishes or fails.
+   */
+  function tryStream(
+    ref: string,
+    context: Context,
+    options: SimpleStreamOptions | undefined,
+  ): { stream: AssistantMessageEventStream; ref: string } | null {
+    if (!sessionCtx) return null;
+    const { provider, modelId } = splitRef(ref);
+    const realModel = sessionCtx.modelRegistry.find(provider, modelId);
+    if (!realModel) return null;
+    return { stream: piStreamSimple(realModel, context, options), ref };
+  }
 
-    /**
-     * Consume an upstream stream, forwarding events to a proxy stream.
-     * Detects soft failures: error events, or no content tokens within a
-     * timeout window after the stream starts.
-     *
-     * Returns { ok: true } if the stream completed with content,
-     * or { ok: false, reason } if it should be retried on another model.
-     */
-    async function consumeWithDetection(
-      upstream: AssistantMessageEventStream,
-      proxy: AssistantMessageEventStream,
-      timeoutMs: number,
-    ): Promise<{ ok: boolean; reason?: string }> {
-      let hadContent = false;
-      let timedOut = false;
-      let timer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Consume an upstream stream, forwarding events to a proxy stream.
+   * Detects soft failures: error events, or no content tokens within a
+   * timeout window after the stream starts.
+   *
+   * Returns { ok: true } if the stream completed with content,
+   * or { ok: false, reason } if it should be retried on another model.
+   */
+  async function consumeWithDetection(
+    upstream: AssistantMessageEventStream,
+    proxy: AssistantMessageEventStream,
+    timeoutMs: number,
+  ): Promise<{ ok: boolean; reason?: string }> {
+    let hadContent = false;
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
-      // Start a timeout that fires if we never see content
-      const timeoutPromise = new Promise<"timeout">((resolve) => {
-        timer = setTimeout(() => { timedOut = true; resolve("timeout"); }, timeoutMs);
-      });
+    // Start a timeout that fires if we never see content
+    const timeoutPromise = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => { timedOut = true; resolve("timeout"); }, timeoutMs);
+    });
 
-      // Race: iterate the stream vs timeout
-      const iterPromise = (async (): Promise<"done"> => {
-        try {
-          for await (const event of upstream) {
-            // Cancel timeout on first real content
-            if (!hadContent) {
-              const t = event.type;
-              if (t === "text_delta" || t === "thinking_delta" || t === "toolcall_start" || t === "toolcall_delta") {
-                hadContent = true;
-                if (timer) { clearTimeout(timer); timer = null; }
-              }
-            }
-            proxy.push(event);
-            if (event.type === "error") {
+    // Race: iterate the stream vs timeout
+    const iterPromise = (async (): Promise<"done"> => {
+      try {
+        for await (const event of upstream) {
+          // Cancel timeout on first real content
+          if (!hadContent) {
+            const t = event.type;
+            if (t === "text_delta" || t === "thinking_delta" || t === "toolcall_start" || t === "toolcall_delta") {
+              hadContent = true;
               if (timer) { clearTimeout(timer); timer = null; }
-              return "done";
             }
           }
-        } catch (err) {
-          if (timer) { clearTimeout(timer); timer = null; }
-          // Stream threw — treat as soft failure
-          return "done";
+          proxy.push(event);
+          if (event.type === "error") {
+            if (timer) { clearTimeout(timer); timer = null; }
+            return "done";
+          }
         }
+      } catch (err) {
         if (timer) { clearTimeout(timer); timer = null; }
+        // Stream threw — treat as soft failure
         return "done";
-      })();
-
-      const winner = await Promise.race([iterPromise, timeoutPromise]);
-
-      if (winner === "timeout" && !hadContent) {
-        // No content within timeout — soft failure
-        return { ok: false, reason: "empty_timeout" };
       }
+      if (timer) { clearTimeout(timer); timer = null; }
+      return "done";
+    })();
 
-      // Stream completed — check if we actually got content
-      if (!hadContent) {
-        return { ok: false, reason: "empty_response" };
-      }
+    const winner = await Promise.race([iterPromise, timeoutPromise]);
 
-      return { ok: true };
+    if (winner === "timeout" && !hadContent) {
+      // No content within timeout — soft failure
+      return { ok: false, reason: "empty_timeout" };
     }
 
-    /**
-     * Stream with automatic retry on soft failures (empty responses, timeouts).
-     * Creates a proxy AssistantMessageEventStream that consumers iterate.
-     * On failure, records the model as soft-limited and tries the next candidate.
-     */
-    function groupStream(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
+    // Stream completed — check if we actually got content
+    if (!hadContent) {
+      return { ok: false, reason: "empty_response" };
+    }
+
+    return { ok: true };
+  }
+
+  /**
+   * Stream with automatic retry on soft failures (empty responses, timeouts).
+   * Creates a proxy AssistantMessageEventStream that consumers iterate.
+   * On failure, records the model as soft-limited and tries the next candidate.
+   */
+  function groupStream(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
       const groupName = model.id;
       const res = resolve(groupName);
       if (!res) throw new Error(`No available models for group "${groupName}"`);
@@ -1072,8 +1120,9 @@ export default function (pi: ExtensionAPI) {
       });
 
       return proxy;
-    }
+  }
 
+  function registerGroupModels(ctx: any) {
     // Register discovered providers with pi's model registry.
     // Skip providers that have dedicated extensions (CLI OAuth), built-in pi support,
     // or are already registered by another extension.
@@ -1124,27 +1173,8 @@ export default function (pi: ExtensionAPI) {
       } catch { /* provider already registered or config error */ }
     }
 
-    for (const [groupName, g] of Object.entries(cfg.model_groups)) {
-      const res = resolve(groupName);
-      const resolvedRef = res?.selected ?? "none";
-      const resolvedMetrics = res ? getM(resolvedRef) : null;
-
-      pi.registerProvider(groupName, {
-        baseUrl: "https://router.local", // not used — streamSimple overrides
-        apiKey: "router-virtual",        // not used — streamSimple overrides
-        api: "openai-completions",       // not used — streamSimple overrides
-        streamSimple: groupStream,
-        models: [{
-          id: groupName,
-          name: `${groupName} → ${resolvedRef}`,
-          reasoning: true,
-          input: ["text", "image"] as any,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          contextWindow: resolvedMetrics ? 200_000 : 128_000,
-          maxTokens: 64_000,
-        }],
-      });
-    }
+    // Re-register group providers with updated resolution info
+    registerGroupProviders();
   }
 
   // ── Command: /router ───────────────────────────────────────────────────
