@@ -102,7 +102,7 @@ const PROVIDER_MAP: Record<string, ProviderDef> = {
   "azure-openai":        { envVar: "AZURE_OPENAI_API_KEY", authKey: "azure-openai-responses",passPatterns: ["api/azure"],                     billing: "pay_per_token" },
   "deepseek":            { envVar: "DEEPSEEK_API_KEY",     authKey: "deepseek",              passPatterns: ["api/deepseek"],                  billing: "pay_per_token", modelsUrl: "https://api.deepseek.com/models", authHeader: k => ({ "Authorization": `Bearer ${k}` }), baseUrl: "https://api.deepseek.com", api: "openai-completions" },
   "github-copilot":      {                                 authKey: "github-copilot",        passPatterns: [],                                billing: "subscription" },
-  "qwen-cli":            {                                 authKey: "qwen-cli",              passPatterns: [],  cliAuthFiles: [{ path: "~/.qwen/oauth_creds.json", tokenField: "access_token" }],  billing: "subscription", baseUrl: "https://chat.qwen.ai/api", api: "openai-completions" },
+  "qwen-cli":            {                                 authKey: "qwen-cli",              passPatterns: [],  cliAuthFiles: [{ path: "~/.qwen/oauth_creds.json", tokenField: "access_token" }],  billing: "subscription", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", api: "openai-completions" },
   "gemini-cli":          {                                 authKey: "gemini-cli",            passPatterns: [],  cliAuthFiles: [{ path: "~/.gemini/oauth_creds.json", tokenField: "access_token" }],  billing: "subscription" },
   "antigravity":         {                                 authKey: "antigravity",           passPatterns: [],                                billing: "subscription" },
   "ollama":              { local: true,                                                      passPatterns: [],                                billing: "subscription" },
@@ -1055,7 +1055,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     // Register discovered providers with pi's model registry
-    // so modelRegistry.find() works for direct model access and failover
+    // Skip providers already registered (e.g. by other extensions like qwen-cli.ts)
     for (const [provId, def] of Object.entries(PROVIDER_MAP)) {
       if (!def.baseUrl || !def.api) continue;
       const keys = cfg.providers?.[provId]?.keys;
@@ -1075,6 +1075,10 @@ export default function (pi: ExtensionAPI) {
         if (provider === provId && !seen.has(modelId)) { provModels.push(modelId); seen.add(modelId); }
       }
       if (!provModels.length) continue;
+
+      // Skip if provider already has models in the registry (registered by another extension)
+      const alreadyRegistered = provModels.some(id => ctx.modelRegistry.find(provId, id));
+      if (alreadyRegistered) continue;
 
       try {
         pi.registerProvider(provId, {
