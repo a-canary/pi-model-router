@@ -282,6 +282,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       // 4. CLI auth files (e.g. ~/.qwen/oauth_creds.json, ~/.gemini/oauth_creds.json)
+      //    Also sync fresh tokens to pi's auth.json so OAuth flow uses them
       if (def.cliAuthFiles) {
         for (const af of def.cliAuthFiles) {
           const filePath = af.path.replace("~", homedir());
@@ -293,6 +294,20 @@ export default function (pi: ExtensionAPI) {
                 if (data[af.tokenField]) {
                   prov.keys.push({ key: `__cli_oauth__:${filePath}:${af.tokenField}`, label });
                   existingLabels.add(label);
+
+                  // Sync CLI OAuth token to pi's auth.json if newer
+                  if (def.authKey && data.expiry_date) {
+                    try {
+                      const auth = loadAuth();
+                      const existing = auth[def.authKey];
+                      if (existing?.type === "oauth" && data.expiry_date > (existing.expires ?? 0)) {
+                        existing.access = data[af.tokenField];
+                        if (data.refresh_token) existing.refresh = data.refresh_token;
+                        existing.expires = data.expiry_date;
+                        saveAuth(auth);
+                      }
+                    } catch { /* sync failed, non-fatal */ }
+                  }
                 }
               }
             } catch { /* unreadable */ }
