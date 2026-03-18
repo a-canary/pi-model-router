@@ -527,10 +527,11 @@ export default function (pi: ExtensionAPI) {
     // 2. Check pricing cache by exact provider/model ref
     if (cache.openrouter_pricing?.[ref]) return cache.openrouter_pricing[ref];
 
-    // 3. Try normalized partial match (for models known under different provider)
+    // 3. Backfill: find paid OpenRouter pricing for same model (skip $0 free-tier)
     const { modelId } = splitRef(ref);
     const n = norm(modelId);
     for (const [k, v] of Object.entries(cache.openrouter_pricing ?? {})) {
+      if (v.input <= 0) continue; // skip free-tier
       const kModel = k.indexOf("/") >= 0 ? k.slice(k.indexOf("/") + 1) : k;
       if (norm(kModel) === n) return v;
     }
