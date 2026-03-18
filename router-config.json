@@ -2,10 +2,7 @@
   "providers": {
     "anthropic": {
       "billing": "subscription",
-      "monthly_cost_usd": 200,
-      "keys": [
-        { "key": "!pass show api/claude/oauth-token", "label": "primary" }
-      ]
+      "monthly_cost_usd": 200
     },
     "chutes": {
       "billing": "subscription",
@@ -13,37 +10,15 @@
     },
     "openrouter": {
       "billing": "pay_per_token"
-    },
-    "qwen-cli": {
-      "billing": "subscription"
     }
   },
 
   "model_groups": {
-    "strategic": {
-      "description": "Best available model by intelligence",
-      "method": "best"
-    },
-    "tactical": {
-      "description": "GDPval ≥1100, cheapest by billing preference",
-      "method": "tiered",
-      "min_gdpval": 1100
-    },
-    "operational": {
-      "description": "GDPval ≥1000, cheapest by billing preference",
-      "method": "tiered",
-      "min_gdpval": 1000
-    },
-    "scout": {
-      "description": "GDPval ≥800, cheapest by billing preference",
-      "method": "tiered",
-      "min_gdpval": 800
-    },
-    "fallback": {
-      "description": "GDPval ≥620, cheapest by billing preference",
-      "method": "tiered",
-      "min_gdpval": 620
-    }
+    "strategic":  { "description": "Best available model by intelligence",             "method": "best" },
+    "tactical":   { "description": "Top 75% quality, cheapest (prefer subscription)",  "method": "tiered", "min_gdpval_pct": 75 },
+    "operational":{ "description": "Top 50% quality, cheapest (prefer subscription)",  "method": "tiered", "min_gdpval_pct": 50 },
+    "scout":      { "description": "Top 25% quality, cheapest (prefer subscription)",  "method": "tiered", "min_gdpval_pct": 25 },
+    "fallback":   { "description": "Any available model, cheapest",                    "method": "tiered", "min_gdpval_pct": 0  }
   },
 
   "model_metrics": {}
