@@ -75,15 +75,17 @@ interface ProviderDef {
   cliAuthFiles?: { path: string; tokenField: string }[]; // CLI tool auth files (e.g. ~/.qwen/oauth_creds.json)
   local?: boolean;        // ollama/lm-studio — no key needed
   billing?: string;       // default billing type
+  modelsUrl?: string;     // API endpoint for model discovery (e.g. /v1/models)
+  authHeader?: (key: string) => Record<string, string>; // how to authenticate
 }
 
 const PROVIDER_MAP: Record<string, ProviderDef> = {
-  "anthropic":           { envVar: "ANTHROPIC_API_KEY",    authKey: "anthropic",             passPatterns: ["api/claude", "api/anthropic"],   billing: "subscription" },
-  "openai":              { envVar: "OPENAI_API_KEY",       authKey: "openai",                passPatterns: ["api/openai"],                    billing: "pay_per_token" },
-  "google":              { envVar: "GEMINI_API_KEY",       authKey: "google",                passPatterns: ["api/gemini", "api/google"],      billing: "pay_per_token" },
+  "anthropic":           { envVar: "ANTHROPIC_API_KEY",    authKey: "anthropic",             passPatterns: ["api/claude", "api/anthropic"],   billing: "subscription", modelsUrl: "https://api.anthropic.com/v1/models?limit=100", authHeader: k => ({ "x-api-key": k, "anthropic-version": "2023-06-01" }) },
+  "openai":              { envVar: "OPENAI_API_KEY",       authKey: "openai",                passPatterns: ["api/openai"],                    billing: "pay_per_token", modelsUrl: "https://api.openai.com/v1/models", authHeader: k => ({ "Authorization": `Bearer ${k}` }) },
+  "google":              { envVar: "GEMINI_API_KEY",       authKey: "google",                passPatterns: ["api/gemini", "api/google"],      billing: "pay_per_token", modelsUrl: "https://generativelanguage.googleapis.com/v1beta/models", authHeader: k => ({ "x-goog-api-key": k }) },
   "openrouter":          { envVar: "OPENROUTER_API_KEY",   authKey: "openrouter",            passPatterns: ["api/openrouter"],                billing: "pay_per_token" },
   "chutes":              { envVar: "CHUTES_API_KEY",       authKey: "chutes",                passPatterns: ["api/chutes"],                    billing: "subscription" },
-  "mistral":             { envVar: "MISTRAL_API_KEY",      authKey: "mistral",               passPatterns: ["api/mistral"],                   billing: "pay_per_token" },
+  "mistral":             { envVar: "MISTRAL_API_KEY",      authKey: "mistral",               passPatterns: ["api/mistral"],                   billing: "pay_per_token", modelsUrl: "https://api.mistral.ai/v1/models", authHeader: k => ({ "Authorization": `Bearer ${k}` }) },
   "groq":                { envVar: "GROQ_API_KEY",         authKey: "groq",                  passPatterns: ["api/groq"],                      billing: "pay_per_token" },
   "cerebras":            { envVar: "CEREBRAS_API_KEY",     authKey: "cerebras",              passPatterns: ["api/cerebras"],                  billing: "pay_per_token" },
   "xai":                 { envVar: "XAI_API_KEY",          authKey: "xai",                   passPatterns: ["api/xai"],                       billing: "pay_per_token" },
@@ -96,7 +98,7 @@ const PROVIDER_MAP: Record<string, ProviderDef> = {
   "opencode-go":         { envVar: "OPENCODE_API_KEY",     authKey: "opencode-go",           passPatterns: [],                                billing: "pay_per_token" },
   "vercel-ai-gateway":   { envVar: "AI_GATEWAY_API_KEY",   authKey: "vercel-ai-gateway",     passPatterns: ["api/vercel"],                    billing: "pay_per_token" },
   "azure-openai":        { envVar: "AZURE_OPENAI_API_KEY", authKey: "azure-openai-responses",passPatterns: ["api/azure"],                     billing: "pay_per_token" },
-  "deepseek":            { envVar: "DEEPSEEK_API_KEY",     authKey: "deepseek",              passPatterns: ["api/deepseek"],                  billing: "pay_per_token" },
+  "deepseek":            { envVar: "DEEPSEEK_API_KEY",     authKey: "deepseek",              passPatterns: ["api/deepseek"],                  billing: "pay_per_token", modelsUrl: "https://api.deepseek.com/models", authHeader: k => ({ "Authorization": `Bearer ${k}` }) },
   "github-copilot":      {                                 authKey: "github-copilot",        passPatterns: [],                                billing: "subscription" },
   "qwen-cli":            {                                 authKey: "qwen-cli",              passPatterns: [],  cliAuthFiles: [{ path: "~/.qwen/oauth_creds.json", tokenField: "access_token" }],  billing: "subscription" },
   "gemini-cli":          {                                 authKey: "gemini-cli",            passPatterns: [],  cliAuthFiles: [{ path: "~/.gemini/oauth_creds.json", tokenField: "access_token" }],  billing: "subscription" },
@@ -366,6 +368,29 @@ export default function (pi: ExtensionAPI) {
           }
           cache.openrouter_pricing = pricing;
         } catch {}
+        // Scan direct API providers with modelsUrl (anthropic, openai, etc.)
+        for (const [provId, def] of Object.entries(PROVIDER_MAP)) {
+          if (!def.modelsUrl || !def.authHeader) continue;
+          const keys = cfg.providers?.[provId]?.keys;
+          if (!keys?.length) continue;
+          try {
+            const key = resolveKeyValue(keys[activeKeyIdx[provId] ?? 0].key);
+            const headers = def.authHeader(key);
+            const headerArgs = Object.entries(headers).map(([k, v]) => `-H "${k}: ${v}"`).join(" ");
+            const raw = execSync(`curl -sL --max-time 15 ${headerArgs} "${def.modelsUrl}"`, { encoding: "utf-8", maxBuffer: 2e6 });
+            const d = JSON.parse(raw);
+            // Handle both { data: [...] } (OpenAI-style) and { models: [...] } (Google-style)
+            const list = d.data ?? d.models ?? [];
+            for (const m of list) {
+              const id = m.id ?? m.name?.replace(/^models\//, "");
+              if (!id) continue;
+              // Skip non-chat models (embeddings, tts, etc.)
+              if (/embed|tts|whisper|dall|moderation|babbage|davinci|search|audio|realtime|image|transcri/i.test(id)) continue;
+              const existing = models.find(x => x.provider === provId && x.id === id);
+              if (!existing) models.push({ id, provider: provId, cost_per_m: 0 });
+            }
+          } catch { /* provider scan failed, non-fatal */ }
+        }
         if (models.length) { cache.available_models = models; cache.models_cached = new Date().toISOString(); }
       }
       saveCache();
