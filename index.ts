@@ -216,12 +216,14 @@ export default function (pi: ExtensionAPI) {
       const lines = raw.split("\n");
       const stack: string[] = [];
       const entries: string[] = [];
-      for (const line of lines) {
+      for (let line of lines) {
+        // Strip ANSI escape codes (colors from pass ls output)
+        line = line.replace(/\x1b\[[0-9;]*m/g, "");
         if (line === "Password Store" || !line.trim()) continue;
         // Determine depth by counting tree prefixes (each level is 4 chars: "│   " or "    ")
         const stripped = line.replace(/[│├└─\s]/g, "");
         if (!stripped) continue;
-        const depth = Math.floor((line.length - line.replace(/^[│ ├└─]+/, "").length) / 4);
+        const depth = Math.floor((line.length - line.replace(/^[^a-zA-Z0-9]+/, "").length) / 4);
         stack.length = depth;
         stack[depth] = stripped;
         entries.push(stack.filter(Boolean).join("/"));
@@ -806,7 +808,7 @@ export default function (pi: ExtensionAPI) {
       pi.registerProvider(groupName, {
         baseUrl: "https://router.local", // not used — streamSimple overrides
         apiKey: "router-virtual",        // not used — streamSimple overrides
-        api: "openai-completions",       // not used — streamSimple overrides
+        api: `router-group-${groupName}`, // unique per group to avoid overwriting global API providers
         streamSimple: groupStream,
         models: [{
           id: groupName,
@@ -830,7 +832,8 @@ export default function (pi: ExtensionAPI) {
     sessionCtx = ctx;
     load(); loadCache(); sessionStart = Date.now();
     discoverKeys();
-    registerGroupModels(ctx);
+
+    await registerGroupModels(ctx);
     scan().catch(() => {});
 
     // Footer
@@ -970,16 +973,23 @@ export default function (pi: ExtensionAPI) {
    * promise that resolves to { ok, hadContent, error? } when the stream
    * finishes or fails.
    */
-  function tryStream(
+  async function tryStream(
     ref: string,
     context: Context,
     options: SimpleStreamOptions | undefined,
-  ): { stream: AssistantMessageEventStream; ref: string } | null {
+  ): Promise<{ stream: AssistantMessageEventStream; ref: string } | null> {
     if (!sessionCtx) return null;
     const { provider, modelId } = splitRef(ref);
+    // Skip group virtual models to prevent recursion
+    if (cfg.model_groups[provider]) return null;
     const realModel = sessionCtx.modelRegistry.find(provider, modelId);
     if (!realModel) return null;
-    return { stream: piStreamSimple(realModel, context, options), ref };
+    if (cfg.model_groups[realModel.provider]) return null;
+    // Resolve API key for the target provider (may come from customProviderApiKeys fallback)
+    const apiKey = await sessionCtx.modelRegistry.getApiKey(realModel).catch(() => null);
+    if (!apiKey) return null;
+    const streamOpts = { ...options, apiKey };
+    return { stream: piStreamSimple(realModel, context, streamOpts), ref };
   }
 
   /**
@@ -1071,7 +1081,7 @@ export default function (pi: ExtensionAPI) {
           while (candidates.length > 0) {
             const ref = candidates.shift()!;
             if (isLimited(ref)) continue;
-            target = tryStream(ref, context, options);
+            target = await tryStream(ref, context, options);
             if (target) { targetRef = ref; break; }
           }
 
@@ -1122,7 +1132,7 @@ export default function (pi: ExtensionAPI) {
       return proxy;
   }
 
-  function registerGroupModels(ctx: any) {
+  async function registerGroupModels(ctx: any) {
     // Register discovered providers with pi's model registry.
     // Skip providers that have dedicated extensions (CLI OAuth), built-in pi support,
     // or are already registered by another extension.
@@ -1151,9 +1161,12 @@ export default function (pi: ExtensionAPI) {
       }
       if (!provModels.length) continue;
 
-      // Skip if provider already has models in the registry (registered by another extension)
+      // Skip if provider already has models AND a working API key
       const alreadyRegistered = provModels.some(id => ctx.modelRegistry.find(provId, id));
-      if (alreadyRegistered) continue;
+      if (alreadyRegistered) {
+        const existingKey = await ctx.modelRegistry.getApiKeyForProvider(provId).catch(() => null);
+        if (existingKey) continue;
+      }
 
       try {
         pi.registerProvider(provId, {
