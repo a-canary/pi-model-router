@@ -18,6 +18,7 @@
   "files": [
     "index.ts",
     "router-config.json",
+    "skills/",
     "PI.md",
     "README.md"
   ],
