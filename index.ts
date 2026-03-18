@@ -38,7 +38,7 @@ interface Cache {
   benchmarks?: Record<string, number>;
   cost_mux?: Record<string, number>; cost_mux_last_bump?: Record<string, string>;
   exhausted_keys?: Record<string, number>; // "provider:keyIdx" → exhausted_until timestamp
-  openrouter_pricing?: Record<string, { input: number; output: number }>; // normalized model name → $/1M
+  openrouter_pricing?: Record<string, { input: number; output: number }>; // provider/modelId ref → $/1M
   usage_log?: { ref: string; tokens: number; ts: number }[]; // token usage history
 }
 
@@ -335,12 +335,12 @@ export default function (pi: ExtensionAPI) {
           const pricing = cache.openrouter_pricing ?? {};
           for (const m of d.data ?? []) {
             models.push({ id: m.id, provider: "chutes", cost_per_m: m.pricing?.prompt ?? 0 });
-            // Capture pricing ($/1M tokens)
+            // Capture pricing ($/1M tokens) keyed by provider/model ref
             const inp = m.pricing?.prompt ?? 0;
             const out = m.pricing?.completion ?? 0;
             if (inp >= 0 && out >= 0) {
-              const n = norm(m.id);
-              if (!pricing[n] || inp < pricing[n].input) pricing[n] = { input: inp, output: out };
+              const ref = `chutes/${m.id}`;
+              if (!pricing[ref] || inp < pricing[ref].input) pricing[ref] = { input: inp, output: out };
             }
           }
           cache.openrouter_pricing = pricing;
@@ -351,13 +351,12 @@ export default function (pi: ExtensionAPI) {
           for (const m of d.data ?? []) {
             // Capture free models for scout
             if (String(m.pricing?.prompt ?? "1") === "0") models.push({ id: m.id, provider: "openrouter", cost_per_m: 0 });
-            // Capture all pricing (per-token → per-million)
+            // Capture all pricing (per-token → per-million) keyed by provider/model ref
             const inp = parseFloat(m.pricing?.prompt ?? "0") * 1_000_000;
             const out = parseFloat(m.pricing?.completion ?? "0") * 1_000_000;
             if (inp >= 0 && out >= 0) {
-              const n = norm(m.id);
-              // Don't let free-tier ($0) overwrite real pricing from other providers
-              if (!pricing[n] || (inp > 0 && inp < pricing[n].input)) pricing[n] = { input: inp, output: out };
+              const ref = `openrouter/${m.id}`;
+              pricing[ref] = { input: inp, output: out };
             }
           }
           cache.openrouter_pricing = pricing;
@@ -525,14 +524,15 @@ export default function (pi: ExtensionAPI) {
     const cm = cfg.model_metrics[ref];
     if (cm?.cost_per_m) return { input: cm.cost_per_m, output: cm.cost_per_m };
 
-    // 2. Check OpenRouter/Chutes pricing cache
+    // 2. Check pricing cache by exact provider/model ref
+    if (cache.openrouter_pricing?.[ref]) return cache.openrouter_pricing[ref];
+
+    // 3. Try normalized partial match (for models known under different provider)
     const { modelId } = splitRef(ref);
     const n = norm(modelId);
-    if (cache.openrouter_pricing?.[n]) return cache.openrouter_pricing[n];
-
-    // 3. Try partial match
     for (const [k, v] of Object.entries(cache.openrouter_pricing ?? {})) {
-      if (k.includes(n) || n.includes(k)) return v;
+      const kModel = k.indexOf("/") >= 0 ? k.slice(k.indexOf("/") + 1) : k;
+      if (norm(kModel) === n) return v;
     }
     return null;
   }
