@@ -560,10 +560,11 @@ export default function (pi: ExtensionAPI) {
 
   // ── Auto-discovery ────────────────────────────────────────────────────
 
-  /** All known model refs from auto-discovery + any pinned models in group config */
+  /** All known model refs: auto-discovered + configured metrics + any pinned models */
   function allDiscoveredRefs(): string[] {
     const refs = new Set<string>();
     for (const m of cache.available_models ?? []) refs.add(`${m.provider}/${m.id}`);
+    for (const ref of Object.keys(cfg.model_metrics)) refs.add(ref);
     for (const g of Object.values(cfg.model_groups)) {
       for (const r of g.models ?? []) refs.add(r);
     }
