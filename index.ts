@@ -23,7 +23,7 @@ import { homedir } from "node:os";
 interface Metrics { gdpval: number; throughput_tps: number; avg_latency_ms: number; cost_per_m: number; last_updated: number; }
 interface RateLimit { cooldown_until: number; backoff_ms: number; hits: number; }
 interface PipeStep { method: string; top_k?: number; }
-interface Group { description?: string; method: string; top_k?: number; pipeline?: PipeStep[]; models: string[]; filter_free?: boolean; }
+interface Group { description?: string; method: string; top_k?: number; pipeline?: PipeStep[]; models?: string[]; filter_free?: boolean; min_gdpval_pct?: number; }
 interface ProviderKey { key: string; label?: string; }
 interface ProviderConfig { billing: string; monthly_cost_usd?: number; keys?: ProviderKey[]; }
 interface Config {
@@ -347,7 +347,7 @@ export default function (pi: ExtensionAPI) {
         } catch {}
         try {
           const d = JSON.parse(execSync(`curl -sL --max-time 20 "https://openrouter.ai/api/v1/models"`, { encoding: "utf-8", maxBuffer: 5e6 }));
-          const pricing: Record<string, { input: number; output: number }> = {};
+          const pricing: Record<string, { input: number; output: number }> = cache.openrouter_pricing ?? {};
           for (const m of d.data ?? []) {
             // Capture free models for scout
             if (String(m.pricing?.prompt ?? "1") === "0") models.push({ id: m.id, provider: "openrouter", cost_per_m: 0 });
@@ -356,7 +356,8 @@ export default function (pi: ExtensionAPI) {
             const out = parseFloat(m.pricing?.completion ?? "0") * 1_000_000;
             if (inp >= 0 && out >= 0) {
               const n = norm(m.id);
-              if (!pricing[n] || inp < pricing[n].input) pricing[n] = { input: inp, output: out };
+              // Don't let free-tier ($0) overwrite real pricing from other providers
+              if (!pricing[n] || (inp > 0 && inp < pricing[n].input)) pricing[n] = { input: inp, output: out };
             }
           }
           cache.openrouter_pricing = pricing;
@@ -556,10 +557,73 @@ export default function (pi: ExtensionAPI) {
 
   // ── Resolution ─────────────────────────────────────────────────────────
 
+  // ── Auto-discovery ────────────────────────────────────────────────────
+
+  /** All known model refs from auto-discovery + any pinned models in group config */
+  function allDiscoveredRefs(): string[] {
+    const refs = new Set<string>();
+    for (const m of cache.available_models ?? []) refs.add(`${m.provider}/${m.id}`);
+    for (const g of Object.values(cfg.model_groups)) {
+      for (const r of g.models ?? []) refs.add(r);
+    }
+    return [...refs];
+  }
+
+  /** Get billing tier for a model ref: 0=free, 1=subscription, 2=local, 3=payg */
+  function billingTier(ref: string): number {
+    const prov = ref.split("/")[0];
+    const provDef = PROVIDER_MAP[prov];
+    const provCfg = cfg.providers?.[prov];
+    const billing = provCfg?.billing ?? provDef?.billing ?? "pay_per_token";
+    // Local providers (ollama, lm-studio)
+    if (provDef?.local) return 2;
+    // Free models (openrouter :free variants, or cost_per_m === 0 from discovery)
+    const discovered = (cache.available_models ?? []).find(m => `${m.provider}/${m.id}` === ref);
+    if (discovered?.cost_per_m === 0) return 0;
+    if (billing === "subscription") return 1;
+    return 3; // pay per token
+  }
+
+  /** Filter to available models (not rate-limited, healthy provider keys) */
+  function filterAvailable(refs: string[]): string[] {
+    return refs.filter(r => {
+      if (isLimited(r)) return false;
+      const { provider } = splitRef(r);
+      const health = providerKeyHealth(provider);
+      return health === "valid" || health === "unchecked";
+    });
+  }
+
+  /** Filter by minimum gdpval percentile (0-100). Keeps models at or above the percentile threshold. */
+  function filterByQualityPct(refs: string[], pct: number): string[] {
+    if (!refs.length || pct <= 0) return refs;
+    const gdps = refs.map(r => getM(r).gdpval).sort((a, b) => a - b);
+    const idx = Math.floor((pct / 100) * (gdps.length - 1));
+    const threshold = gdps[idx];
+    return refs.filter(r => getM(r).gdpval >= threshold);
+  }
+
+  /**
+   * Sort by billing preference: free → subscription (by rate-limit pressure & cost) → local → PAYG (by cost)
+   * Within each tier, sort by effective cost. Subscription also considers rate-limit pressure.
+   */
+  function sortByBillingPreference(refs: string[]): string[] {
+    return [...refs].sort((a, b) => {
+      const ta = billingTier(a), tb = billingTier(b);
+      if (ta !== tb) return ta - tb;
+      // Within subscription tier, prefer lower rate-limit pressure first, then cost
+      if (ta === 1) {
+        const pa = limitSecs(a), pb = limitSecs(b);
+        if (pa !== pb) return pa - pb;
+      }
+      return effCost(a) - effCost(b);
+    });
+  }
+
   function available(g: Group) {
-    let c = [...g.models];
-    if (g.filter_free) c = c.filter(r => getM(r).cost_per_m === 0);
-    return c.filter(r => !isLimited(r));
+    let c = allDiscoveredRefs();
+    if (g.min_gdpval_pct != null) c = filterByQualityPct(c, g.min_gdpval_pct);
+    return filterAvailable(c);
   }
 
   function sortBy(models: string[], method: string): string[] {
@@ -568,8 +632,9 @@ export default function (pi: ExtensionAPI) {
     if (method === "max_throughput") return s.sort((a, b) => getM(b).throughput_tps - getM(a).throughput_tps);
     if (method === "min_cost") return s.sort((a, b) => effCost(a) - effCost(b));
     if (method === "max_gdpval") return s.sort((a, b) => getM(b).gdpval - getM(a).gdpval);
-    if (method === "roundrobin") return s; // handled in resolve
-    return s; // failover: preserve order
+    if (method === "billing_preference") return sortByBillingPreference(s);
+    if (method === "roundrobin") return s;
+    return s;
   }
 
   function resolve(name: string): { selected: string; candidates: string[] } | null {
@@ -578,7 +643,13 @@ export default function (pi: ExtensionAPI) {
     let c = available(g);
     if (!c.length) return null;
 
-    if (g.method === "pipeline" && g.pipeline) {
+    if (g.method === "best") {
+      // Strategic: highest gdpval available
+      c = sortBy(c, "max_gdpval");
+    } else if (g.method === "tiered") {
+      // Quality-gated + billing preference
+      c = sortByBillingPreference(c);
+    } else if (g.method === "pipeline" && g.pipeline) {
       for (const step of g.pipeline) { c = sortBy(c, step.method); if (step.top_k && step.top_k < c.length) c = c.slice(0, step.top_k); }
     } else if (g.method === "roundrobin") {
       const i = (rrCounters[name] ?? 0) % c.length; rrCounters[name] = i + 1;
@@ -600,40 +671,43 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Get top N models for a group, including rate-limited ones (for display)
-  // The final pipeline step sorts but doesn't limit — we want to see failover options
   function getTopModels(groupName: string, n: number): { ref: string; limited: boolean; rank: number }[] {
     const g = cfg.model_groups[groupName];
     if (!g) return [];
-    let c = [...g.models];
-    if (g.filter_free) c = c.filter(r => getM(r).cost_per_m === 0);
+    let c = allDiscoveredRefs();
+    if (g.min_gdpval_pct != null) c = filterByQualityPct(c, g.min_gdpval_pct);
 
-    // Sort using the group's method but DON'T filter out limited models
-    if (g.method === "pipeline" && g.pipeline) {
+    if (g.method === "best") {
+      c = sortBy(c, "max_gdpval");
+    } else if (g.method === "tiered") {
+      c = sortByBillingPreference(c);
+    } else if (g.method === "pipeline" && g.pipeline) {
       for (let i = 0; i < g.pipeline.length; i++) {
         const step = g.pipeline[i];
         c = sortBy(c, step.method);
-        // Only apply top_k for intermediate steps, not the final one (it's a ranker, not a limiter)
         const isLastStep = i === g.pipeline.length - 1;
-        if (step.top_k && step.top_k < c.length && !isLastStep) {
-          c = c.slice(0, step.top_k);
-        }
+        if (step.top_k && step.top_k < c.length && !isLastStep) c = c.slice(0, step.top_k);
       }
     } else {
       c = sortBy(c, g.method);
-      // For non-pipeline, don't limit either — show full ranked list
     }
 
-    // Split into available and limited, then interleave: available first, then limited
-    const available = c.filter(ref => !isLimited(ref));
+    const avail = c.filter(ref => !isLimited(ref));
     const limited = c.filter(ref => isLimited(ref));
-    const ranked = [...available, ...limited];
-
+    const ranked = [...avail, ...limited];
     return ranked.slice(0, n).map((ref, i) => ({ ref, limited: isLimited(ref), rank: i }));
   }
 
   function detectGroup(ref: string): string | null {
     if (activeGroup) return activeGroup;
-    for (const [n, g] of Object.entries(cfg.model_groups)) if (g.models.includes(ref)) return n;
+    for (const [n, g] of Object.entries(cfg.model_groups)) if (g.models?.includes(ref)) return n;
+    // With auto-discovery, any available model belongs to any group — return lowest tier that includes it
+    const refs = allDiscoveredRefs();
+    if (refs.includes(ref)) {
+      for (const name of ["scout", "operational", "tactical", "strategic"]) {
+        if (cfg.model_groups[name]) return name;
+      }
+    }
     return null;
   }
 
@@ -986,8 +1060,10 @@ export default function (pi: ExtensionAPI) {
         const top = getTopModels(groupName, 5);
         const method = g.method === "pipeline"
           ? g.pipeline!.map(s => `${s.method}${s.top_k ? `:${s.top_k}` : ""}`).join(" → ")
+          : g.method === "best" ? "best gdpval"
+          : g.method === "tiered" ? `tiered ≥${g.min_gdpval_pct ?? 0}%`
           : g.method;
-        const active = curModel && g.models.includes(curModel);
+        const active = curModel && allDiscoveredRefs().includes(curModel);
         const activeMarker = active ? " ◀" : "";
 
         // Group header

@@ -21,92 +21,28 @@
 
   "model_groups": {
     "strategic": {
-      "description": "Best 2 models by intelligence, then cheapest",
-      "method": "pipeline",
-      "pipeline": [
-        { "method": "max_gdpval", "top_k": 2 },
-        { "method": "min_cost", "top_k": 1 }
-      ],
-      "models": [
-        "anthropic/claude-opus-4-6-20250514",
-        "chutes/zai-org/GLM-5-TEE",
-        "chutes/MiniMaxAI/MiniMax-M2.5-TEE",
-        "chutes/moonshotai/Kimi-K2.5-TEE",
-        "openrouter/qwen/qwen3.5-397b:free"
-      ]
+      "description": "Best available model by intelligence",
+      "method": "best"
     },
     "tactical": {
-      "description": "Top 4 by intelligence, then cheapest",
-      "method": "pipeline",
-      "pipeline": [
-        { "method": "max_gdpval", "top_k": 4 },
-        { "method": "min_cost", "top_k": 1 }
-      ],
-      "models": [
-        "anthropic/claude-opus-4-6-20250514",
-        "anthropic/claude-sonnet-4-5-20250514",
-        "chutes/zai-org/GLM-5-TEE",
-        "chutes/MiniMaxAI/MiniMax-M2.5-TEE",
-        "chutes/moonshotai/Kimi-K2.5-TEE",
-        "chutes/openai/gpt-oss-120b-TEE",
-        "openrouter/qwen/qwen3.5-397b:free",
-        "qwen-cli/qwen3-coder-plus"
-      ]
+      "description": "Top 25% quality, cheapest by billing preference",
+      "method": "tiered",
+      "min_gdpval_pct": 75
     },
     "operational": {
-      "description": "Top 8 by intelligence, then cheapest",
-      "method": "pipeline",
-      "pipeline": [
-        { "method": "max_gdpval", "top_k": 8 },
-        { "method": "min_cost", "top_k": 1 }
-      ],
-      "models": [
-        "anthropic/claude-sonnet-4-5-20250514",
-        "anthropic/claude-haiku-3-5-20241022",
-        "chutes/zai-org/GLM-5-TEE",
-        "chutes/zai-org/GLM-5-Turbo",
-        "chutes/MiniMaxAI/MiniMax-M2.5-TEE",
-        "chutes/moonshotai/Kimi-K2.5-TEE",
-        "chutes/openai/gpt-oss-120b-TEE",
-        "chutes/XiaomiMiMo/MiMo-V2-Flash-TEE",
-        "openrouter/qwen/qwen3.5-397b:free",
-        "openrouter/qwen/qwen3-coder:free",
-        "openrouter/meta-llama/llama-3.3-70b-instruct:free",
-        "qwen-cli/qwen3-coder-plus",
-        "qwen-cli/qwen3-coder-flash"
-      ]
+      "description": "Top 50% quality, cheapest by billing preference",
+      "method": "tiered",
+      "min_gdpval_pct": 50
     },
     "scout": {
-      "description": "Top 16 by intelligence, then cheapest — exploration",
-      "method": "pipeline",
-      "pipeline": [
-        { "method": "max_gdpval", "top_k": 16 },
-        { "method": "min_cost", "top_k": 1 }
-      ],
-      "filter_free": true,
-      "models": [
-        "chutes/zai-org/GLM-5-Turbo",
-        "chutes/MiniMaxAI/MiniMax-M2.5-TEE",
-        "chutes/openai/gpt-oss-120b-TEE",
-        "chutes/XiaomiMiMo/MiMo-V2-Flash-TEE",
-        "openrouter/qwen/qwen3.5-397b:free",
-        "openrouter/qwen/qwen3-coder:free",
-        "openrouter/meta-llama/llama-3.3-70b-instruct:free",
-        "openrouter/deepseek/deepseek-v3-0324:free",
-        "openrouter/mistralai/mistral-small-3.1-24b-instruct:free",
-        "qwen-cli/qwen3-coder-plus",
-        "qwen-cli/qwen3-coder-flash"
-      ]
+      "description": "Top 25% quality, cheapest by billing preference",
+      "method": "tiered",
+      "min_gdpval_pct": 25
     },
     "fallback": {
-      "description": "Simple ordered failover chain",
-      "method": "failover",
-      "models": [
-        "anthropic/claude-opus-4-6-20250514",
-        "chutes/zai-org/GLM-5-TEE",
-        "openrouter/qwen/qwen3.5-397b:free",
-        "qwen-cli/qwen3-coder-plus"
-      ]
+      "description": "Any available model, cheapest by billing preference",
+      "method": "tiered",
+      "min_gdpval_pct": 0
     }
   },
 
