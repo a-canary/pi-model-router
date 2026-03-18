@@ -357,6 +357,11 @@ export default function (pi: ExtensionAPI) {
             if (inp >= 0 && out >= 0) {
               const ref = `openrouter/${m.id}`;
               pricing[ref] = { input: inp, output: out };
+              // Also store under original provider ref (e.g. anthropic/claude-opus-4.6)
+              // so backfill can match models on direct providers
+              if (m.id.includes("/") && inp > 0) {
+                if (!pricing[m.id] || inp < pricing[m.id].input) pricing[m.id] = { input: inp, output: out };
+              }
             }
           }
           cache.openrouter_pricing = pricing;
