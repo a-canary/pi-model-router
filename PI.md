@@ -1,133 +1,113 @@
 # pi-model-router
 
-Route model group names (strategic, tactical, operational, scout) to concrete provider/model pairs. Balance intelligence, cost, and availability automatically.
+Route model group names (strategic, tactical, operational, scout, fallback) to concrete provider/model pairs. Auto-discovers models and pricing. Balances intelligence, cost, and availability.
 
-## Core loop
+## Architecture
 
-1. Groups define candidate pool + selection pipeline (`max_gdpval top_k → min_cost`)
-2. `effectiveCost = (baseCost || 0.01) × subDiscount(0.5) × costMux[provider]`
-3. On 429: exponential backoff per model (1m→2m→4m→8m→16m→32m→64m→90m cap), immediate failover
-4. On 4th consecutive 429: `costMux[provider] += 1` (max 1/day, validated, never decays)
-5. On success: reset model's consecutive hit count
-
-## Files
+### Auto-Discovery Pipeline
 
 ```
-index.ts              ~450 lines. Extension entry point.
-router-config.json    Groups, providers, seed metrics.
-.cache/scan-cache.json  GDPval (forever), models (24hr), benchmarks, costMux.
-PI.md                 This file. Design source of truth.
-README.md             Quick-start reference.
+startup → discoverKeys() → scan() → registerProviders → registerGroups
 ```
 
-## Data flow (passive except set_model_from_group tool)
+1. **Key discovery**: env vars, auth.json, pass store, CLI OAuth files across 24+ providers
+2. **Model scan** (async, non-blocking): Chutes API, OpenRouter API, direct provider /v1/models endpoints
+3. **GDPval scrape**: intelligence scores from artificialanalysis.ai, cached with builtin fallbacks
+4. **Pricing**: per-provider/model from APIs, OpenRouter backfill for providers without pricing endpoints
+5. **Provider registration**: discovered providers registered with pi's modelRegistry (skip built-in + CLI OAuth providers)
+6. **Group registration**: virtual providers for each group that route through resolved models
+
+### Group Selection
+
+| Group | Method | Description |
+|-------|--------|-------------|
+| **strategic** | `best` | Highest gdpval available, period |
+| **tactical** | `tiered` ≥75% | Top 25% quality, cheapest by billing preference |
+| **operational** | `tiered` ≥50% | Top 50% quality, cheapest by billing preference |
+| **scout** | `tiered` ≥25% | Top 25% quality, cheapest by billing preference |
+| **fallback** | `tiered` ≥0% | Any available, cheapest by billing preference |
+
+**Billing preference order**: free → subscription (by rate-limit pressure + cost) → local → pay-per-token (by cost)
+
+### Effective Cost
 
 ```
-session_start → load config + cache, background scan
-turn_start    → record time + model ref
-turn_end      → update throughput/latency EMA, recordSuccess
-tool_result   → detect 429 → backoff + costMux at 4th hit
+effectiveCost = (baseCost || 0.01) × subDiscount(0.5) × costMux[provider]
 ```
 
-## Key functions
+### Rate Limit Handling
 
-- `resolve(name)` → pipeline sort, filter rate-limited → {selected, candidates}
-- `effCost(ref)` → base × subDiscount × costMux
-- `recordLimit(ref)` → backoff schedule + costMux bump at hit 4
-- `recordOk(ref)` → reset hit count
-- `lookupGdp(id)` → fuzzy match normalized model name against score table
-- `scan()` → scrape GDPval (once forever) + fetch free models (24hr)
-
-## Backoff schedule
+On 429 (after key rotation exhausted): exponential backoff per model, immediate failover to next candidate.
 
 | Hit | Cooldown | Effect |
 |-----|----------|--------|
-| 1 | 1m | failover |
-| 2 | 2m | |
-| 3 | 4m | |
-| 4 | 8m | **costMux[provider] += 1** |
-| 5-7 | 16-64m | |
+| 1-3 | 1m→4m | failover only |
+| 4 | 8m | **costMux[provider] += 1** (max 1/day, never decays) |
+| 5-7 | 16m→64m | |
 | 8+ | 90m cap | |
 
-Guards: max 1 costMux bump/provider/day. Validates provider still hosts model. Never decays.
+### Stream Retry
 
-## Config shape
+Groups use proxy streams with soft-failure detection. On empty response or timeout, the router automatically retries with the next candidate model.
+
+## Data Flow
+
+```
+session_start → load config + cache, async scan, register providers + groups, set footer
+turn_start    → record timestamp + model ref
+turn_end      → update throughput/latency EMA, record success
+tool_result   → detect 429 → key rotation → backoff + costMux at 4th hit
+```
+
+## Key Functions
+
+- `scan()` → async fetch GDPval + models + pricing from APIs
+- `allDiscoveredRefs()` → all models from API discovery + pinned
+- `resolve(name)` → quality filter + billing preference sort → {selected, candidates}
+- `effCost(ref)` → base × subDiscount × costMux
+- `lookupPrice(ref)` → config → exact cache → normalized backfill from OpenRouter
+- `billingTier(ref)` → 0:free, 1:subscription, 2:local, 3:payg
+- `filterByQualityPct(refs, pct)` → keep models at or above gdpval percentile
+- `groupStream()` → proxy stream with retry on soft failures
+
+## Config Shape
 
 ```jsonc
 {
-  "providers": { "<name>": { "billing": "subscription|pay_per_token" } },
-  "model_groups": {
-    "<name>": {
-      "method": "pipeline",
-      "pipeline": [{ "method": "max_gdpval", "top_k": N }, { "method": "min_cost", "top_k": 1 }],
-      "models": ["provider/model-id", ...],
-      "filter_free": false
-    }
+  "providers": {
+    "anthropic": { "billing": "subscription", "keys": [{ "key": "!pass show api/claude/token", "label": "primary" }] },
+    "chutes": { "billing": "subscription" },
+    "openrouter": { "billing": "pay_per_token" }
   },
-  "model_metrics": { "<provider/model-id>": { "gdpval": N, "throughput_tps": N, "avg_latency_ms": N } }
+  "model_groups": {
+    "strategic": { "method": "best" },
+    "tactical": { "method": "tiered", "min_gdpval_pct": 75 },
+    "operational": { "method": "tiered", "min_gdpval_pct": 50 },
+    "scout": { "method": "tiered", "min_gdpval_pct": 25 },
+    "fallback": { "method": "tiered", "min_gdpval_pct": 0 }
+  },
+  "model_metrics": {}
 }
 ```
 
-## Footer
+No curated model lists. Models auto-discovered. GDPval scores scraped + cached.
 
-```
-{group}/{provider}/{modelId} | int:{gdpval} tps:{tps} | {in}/{out} ${cost} {ctx%} | ⏱{time} | ⌂ {cwd} | ⎇ {branch} | ⛔{N}
-```
+## Files
 
-Replaces `~/.pi/agent/extensions/custom-footer.ts` (disabled to `.disabled`).
-
-## Tools
-
-| Tool | Purpose |
+| File | Purpose |
 |------|---------|
-| `set_model_from_group` | Switch session to best model from a group |
-| `resolve_model_group` | Read-only: what would a group resolve to? |
-| `update_model_metrics` | Manual metric override (rarely needed) |
-
-## Key auto-discovery
-
-On session_start, the router scans 3 sources for API keys across 24 providers:
-
-1. **Environment variables** — e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`
-2. **`~/.pi/agent/auth.json`** — existing pi auth entries (API keys + OAuth)
-3. **Pass store** — `pass ls` tree, matching patterns like `api/claude/*`, `api/openrouter/*`
-
-Discovered keys merge into in-memory `providers.*.keys[]` (config file keys take priority, never overwritten). Each key gets a label: `env:ANTHROPIC_API_KEY`, `auth.json`, `pass:api/claude/oauth-token`, etc.
-
-Local providers (ollama, lm-studio) are marked available without keys.
-
-### Supported providers (24)
-
-anthropic, openai, google, openrouter, chutes, mistral, groq, cerebras, xai, zai,
-huggingface, kimi-coding, minimax, minimax-cn, opencode, opencode-go, vercel-ai-gateway,
-azure-openai, deepseek, github-copilot, gemini-cli, antigravity, ollama, lm-studio
-
-## Multi-key rotation
-
-Providers can have multiple API keys/tokens. On 429, the router tries rotating to the next available key before falling back to model-level backoff.
-
-```jsonc
-"providers": {
-  "anthropic": {
-    "billing": "subscription",
-    "keys": [
-      { "key": "!pass show api/claude/token-1", "label": "primary" },
-      { "key": "!pass show api/claude/token-2", "label": "backup" }
-    ]
-  }
-}
-```
-
-Flow on 429:
-1. Mark current key exhausted (1hr cooldown)
-2. Try next non-exhausted key → update `~/.pi/agent/auth.json` → continue (no model backoff)
-3. If all keys exhausted → normal model backoff + costMux
-
-Keys support `!pass show` syntax for secret resolution.
+| `index.ts` | Extension entry point (~1200 lines) |
+| `router-config.json` | Providers, groups, optional metric overrides |
+| `.cache/scan-cache.json` | GDPval scores, model lists, pricing, costMux |
+| `skills/router-login/` | Guided provider onboarding skill |
+| `PI.md` | This file — design source of truth |
+| `README.md` | Quick-start reference |
 
 ## What NOT to add
 
+- Curated model lists (auto-discover everything)
 - Token budget tracking (providers don't expose limits)
 - Proactive load balancing (429 is the signal)
 - Auto-switching mid-session (only via explicit tool call)
 - Complex health checks (backoff + costMux is sufficient)
+- Hardcoded pricing (scrape/backfill from APIs)

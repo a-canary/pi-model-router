@@ -333,13 +333,26 @@ export default function (pi: ExtensionAPI) {
 
   // ── Scan (GDPval forever, models 24hr) ─────────────────────────────────
 
+  async function fetchJson(url: string, opts?: { headers?: Record<string, string>; timeoutMs?: number }): Promise<any> {
+    const res = await fetch(url, {
+      headers: { "User-Agent": "pi-model-router/1.0", ...opts?.headers },
+      signal: AbortSignal.timeout(opts?.timeoutMs ?? 20_000),
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return res.json();
+  }
+
   async function scan(force = false) {
     if (scanning) return;
     scanning = true;
     try {
       if (!cache.gdpval_scraped || force) {
         try {
-          const html = execSync(`curl -sL --max-time 30 -A "Mozilla/5.0" "${GDPVAL_URL}"`, { encoding: "utf-8", maxBuffer: 5e6 });
+          const res = await fetch(GDPVAL_URL, {
+            headers: { "User-Agent": "Mozilla/5.0" },
+            signal: AbortSignal.timeout(30_000),
+          });
+          const html = await res.text();
           const re = /<div[^>]*>([^<]{3,80})<\/div><\/td>\s*<td[^>]*>(\d{3,4})<\/td>/g;
           let m; const scores: Record<string, number> = {};
           while ((m = re.exec(html))) { const nm = m[1].trim(); if (nm && /[A-Za-z]/.test(nm) && !nm.startsWith("<")) scores[nm] = +m[2]; }
@@ -350,11 +363,10 @@ export default function (pi: ExtensionAPI) {
       if (force || age > MODELS_TTL) {
         const models: Cache["available_models"] = [];
         try {
-          const d = JSON.parse(execSync(`curl -sL --max-time 20 "https://llm.chutes.ai/v1/models"`, { encoding: "utf-8", maxBuffer: 2e6 }));
+          const d = await fetchJson("https://llm.chutes.ai/v1/models");
           const pricing = cache.openrouter_pricing ?? {};
           for (const m of d.data ?? []) {
             models.push({ id: m.id, provider: "chutes", cost_per_m: m.pricing?.prompt ?? 0 });
-            // Capture pricing ($/1M tokens) keyed by provider/model ref
             const inp = m.pricing?.prompt ?? 0;
             const out = m.pricing?.completion ?? 0;
             if (inp >= 0 && out >= 0) {
@@ -365,19 +377,15 @@ export default function (pi: ExtensionAPI) {
           cache.openrouter_pricing = pricing;
         } catch {}
         try {
-          const d = JSON.parse(execSync(`curl -sL --max-time 20 "https://openrouter.ai/api/v1/models"`, { encoding: "utf-8", maxBuffer: 5e6 }));
+          const d = await fetchJson("https://openrouter.ai/api/v1/models", { timeoutMs: 25_000 });
           const pricing: Record<string, { input: number; output: number }> = cache.openrouter_pricing ?? {};
           for (const m of d.data ?? []) {
-            // Capture free models for scout
             if (String(m.pricing?.prompt ?? "1") === "0") models.push({ id: m.id, provider: "openrouter", cost_per_m: 0 });
-            // Capture all pricing (per-token → per-million) keyed by provider/model ref
             const inp = parseFloat(m.pricing?.prompt ?? "0") * 1_000_000;
             const out = parseFloat(m.pricing?.completion ?? "0") * 1_000_000;
             if (inp >= 0 && out >= 0) {
               const ref = `openrouter/${m.id}`;
               pricing[ref] = { input: inp, output: out };
-              // Also store under original provider ref (e.g. anthropic/claude-opus-4.6)
-              // so backfill can match models on direct providers
               if (m.id.includes("/") && inp > 0) {
                 if (!pricing[m.id] || inp < pricing[m.id].input) pricing[m.id] = { input: inp, output: out };
               }
@@ -386,28 +394,26 @@ export default function (pi: ExtensionAPI) {
           cache.openrouter_pricing = pricing;
         } catch {}
         // Scan direct API providers with modelsUrl (anthropic, openai, etc.)
-        for (const [provId, def] of Object.entries(PROVIDER_MAP)) {
-          if (!def.modelsUrl || !def.authHeader) continue;
-          const keys = cfg.providers?.[provId]?.keys;
-          if (!keys?.length) continue;
-          try {
-            const key = resolveKeyValue(keys[activeKeyIdx[provId] ?? 0].key);
-            const headers = def.authHeader(key);
-            const headerArgs = Object.entries(headers).map(([k, v]) => `-H "${k}: ${v}"`).join(" ");
-            const raw = execSync(`curl -sL --max-time 15 ${headerArgs} "${def.modelsUrl}"`, { encoding: "utf-8", maxBuffer: 2e6 });
-            const d = JSON.parse(raw);
-            // Handle both { data: [...] } (OpenAI-style) and { models: [...] } (Google-style)
-            const list = d.data ?? d.models ?? [];
-            for (const m of list) {
-              const id = m.id ?? m.name?.replace(/^models\//, "");
-              if (!id) continue;
-              // Skip non-chat models (embeddings, tts, etc.)
-              if (/embed|tts|whisper|dall|moderation|babbage|davinci|search|audio|realtime|image|transcri/i.test(id)) continue;
-              const existing = models.find(x => x.provider === provId && x.id === id);
-              if (!existing) models.push({ id, provider: provId, cost_per_m: 0 });
-            }
-          } catch { /* provider scan failed, non-fatal */ }
-        }
+        const providerScans = Object.entries(PROVIDER_MAP)
+          .filter(([, def]) => def.modelsUrl && def.authHeader)
+          .map(async ([provId, def]) => {
+            const keys = cfg.providers?.[provId]?.keys;
+            if (!keys?.length) return;
+            try {
+              const key = resolveKeyValue(keys[activeKeyIdx[provId] ?? 0].key);
+              const headers = def.authHeader!(key);
+              const d = await fetchJson(def.modelsUrl!, { headers, timeoutMs: 15_000 });
+              const list = d.data ?? d.models ?? [];
+              for (const m of list) {
+                const id = m.id ?? m.name?.replace(/^models\//, "");
+                if (!id) continue;
+                if (/embed|tts|whisper|dall|moderation|babbage|davinci|search|audio|realtime|image|transcri/i.test(id)) continue;
+                const existing = models.find(x => x.provider === provId && x.id === id);
+                if (!existing) models.push({ id, provider: provId, cost_per_m: 0 });
+              }
+            } catch { /* provider scan failed, non-fatal */ }
+          });
+        await Promise.allSettled(providerScans);
         if (models.length) { cache.available_models = models; cache.models_cached = new Date().toISOString(); }
       }
       saveCache();
@@ -618,11 +624,10 @@ export default function (pi: ExtensionAPI) {
 
   // ── Auto-discovery ────────────────────────────────────────────────────
 
-  /** All known model refs: auto-discovered + configured metrics + any pinned models */
+  /** All known model refs: auto-discovered + any pinned models in group config */
   function allDiscoveredRefs(): string[] {
     const refs = new Set<string>();
     for (const m of cache.available_models ?? []) refs.add(`${m.provider}/${m.id}`);
-    for (const ref of Object.keys(cfg.model_metrics)) refs.add(ref);
     for (const g of Object.values(cfg.model_groups)) {
       for (const r of g.models ?? []) refs.add(r);
     }
@@ -1069,25 +1074,31 @@ export default function (pi: ExtensionAPI) {
       return proxy;
     }
 
-    // Register discovered providers with pi's model registry
-    // Skip providers already registered (e.g. by other extensions like qwen-cli.ts)
+    // Register discovered providers with pi's model registry.
+    // Skip providers that have dedicated extensions (CLI OAuth), built-in pi support,
+    // or are already registered by another extension.
+    const SKIP_REGISTRATION = new Set(
+      Object.entries(PROVIDER_MAP)
+        .filter(([, def]) => def.cliAuthFiles || def.local) // CLI OAuth or local — have dedicated extensions
+        .map(([id]) => id)
+    );
+    // Also skip providers pi knows natively (have built-in models)
+    for (const prov of ["anthropic", "openai", "google"]) SKIP_REGISTRATION.add(prov);
+
     for (const [provId, def] of Object.entries(PROVIDER_MAP)) {
       if (!def.baseUrl || !def.api) continue;
+      if (SKIP_REGISTRATION.has(provId)) continue;
       const keys = cfg.providers?.[provId]?.keys;
       if (!keys?.length) continue;
       const rawKey = keys[activeKeyIdx[provId] ?? 0].key;
       const apiKey = resolveKeyValue(rawKey);
-      if (!apiKey || apiKey === rawKey && rawKey.startsWith("__local__")) continue; // skip unresolvable
+      if (!apiKey || apiKey === rawKey && rawKey.startsWith("__local__")) continue;
 
       // Collect models for this provider from available_models + model_metrics
       const provModels: string[] = [];
       const seen = new Set<string>();
       for (const m of cache.available_models ?? []) {
         if (m.provider === provId && !seen.has(m.id)) { provModels.push(m.id); seen.add(m.id); }
-      }
-      for (const ref of Object.keys(cfg.model_metrics)) {
-        const { provider, modelId } = splitRef(ref);
-        if (provider === provId && !seen.has(modelId)) { provModels.push(modelId); seen.add(modelId); }
       }
       if (!provModels.length) continue;
 
