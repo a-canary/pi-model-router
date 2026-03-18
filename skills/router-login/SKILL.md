@@ -38,6 +38,12 @@ Guide based on provider type:
 | chutes | https://chutes.ai/app/api-keys — subscription required |
 | huggingface | https://huggingface.co/settings/tokens |
 
+For CLI-auth providers (qwen-cli, gemini-cli):
+- These use OAuth via their CLI tools, not API keys
+- Auth is stored in `~/.qwen/oauth_creds.json` or `~/.gemini/oauth_creds.json`
+- Run `qwen auth login` or `gemini auth login` to authenticate
+- Tokens expire and need periodic refresh
+
 For providers not listed, ask the user for:
 1. The API key
 2. The base URL (if non-standard)
@@ -80,15 +86,38 @@ Ask the user to run `/router scan` or restart pi. Then check:
 - Are models listed for the provider?
 - Is key health showing "valid"?
 
-### 5. Verify pricing
+### 5. Register models (if no auto-discovery)
 
-Models from the new provider should appear with pricing. If pricing shows `$0.0`:
-- For providers with `modelsUrl` in PROVIDER_MAP: pricing backfills from OpenRouter
-- For providers without: user may need to set `cost_per_m` in `model_metrics` in `router-config.json`
+Some providers (qwen-cli, gemini-cli, ollama, antigravity) don't have scannable `/v1/models` endpoints. For these, models must be registered manually in `router-config.json` under `model_metrics`:
+
+```json
+{
+  "model_metrics": {
+    "qwen-cli/qwen3-coder-plus": {
+      "gdpval": 944,
+      "throughput_tps": 120,
+      "avg_latency_ms": 1000
+    }
+  }
+}
+```
+
+Ask the user which models they want to use. Look up gdpval scores from the `/router` display or https://www.gdpval.com.
+
+For providers with `modelsUrl` in PROVIDER_MAP (anthropic, openai, google, mistral, deepseek), this step is automatic.
+
+### 6. Verify pricing
+
+Models should appear with pricing. Pricing sources (in priority order):
+1. `cost_per_m` set in `model_metrics` config
+2. Direct pricing from the provider's API (Chutes)
+3. Backfill from OpenRouter's paid pricing for the same model name
+
+If pricing still shows `$0.0` for a paid model, set `cost_per_m` ($/1M input tokens) in `model_metrics`.
 
 Check: "Does `/router` show correct pricing for the new provider's models?"
 
-### 6. Confirm group selection
+### 7. Confirm group selection
 
 The new models automatically participate in group selection based on their gdpval scores:
 - **strategic**: best available model by intelligence
@@ -104,8 +133,9 @@ Ask: "Run `/router` to verify the new models appear in the appropriate groups."
 ## Checklist
 
 - [ ] Provider identified
-- [ ] API key obtained
-- [ ] Key stored securely (pass / auth.json / env var)
-- [ ] Connectivity validated — models discovered
+- [ ] API key obtained (or CLI OAuth completed)
+- [ ] Key stored securely (pass / auth.json / env var / CLI auth)
+- [ ] Connectivity validated — models discovered or manually registered
+- [ ] Models registered in `model_metrics` (if no auto-discovery)
 - [ ] Pricing verified — not showing $0.0 for paid models
 - [ ] Group selection confirmed — models appear in expected tiers
