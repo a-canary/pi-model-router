@@ -77,18 +77,20 @@ interface ProviderDef {
   billing?: string;       // default billing type
   modelsUrl?: string;     // API endpoint for model discovery (e.g. /v1/models)
   authHeader?: (key: string) => Record<string, string>; // how to authenticate
+  baseUrl?: string;       // API base URL for pi provider registration
+  api?: string;           // pi API type (e.g. "anthropic", "openai-responses", "qwen")
 }
 
 const PROVIDER_MAP: Record<string, ProviderDef> = {
-  "anthropic":           { envVar: "ANTHROPIC_API_KEY",    authKey: "anthropic",             passPatterns: ["api/claude", "api/anthropic"],   billing: "subscription", modelsUrl: "https://api.anthropic.com/v1/models?limit=100", authHeader: k => ({ "x-api-key": k, "anthropic-version": "2023-06-01" }) },
-  "openai":              { envVar: "OPENAI_API_KEY",       authKey: "openai",                passPatterns: ["api/openai"],                    billing: "pay_per_token", modelsUrl: "https://api.openai.com/v1/models", authHeader: k => ({ "Authorization": `Bearer ${k}` }) },
-  "google":              { envVar: "GEMINI_API_KEY",       authKey: "google",                passPatterns: ["api/gemini", "api/google"],      billing: "pay_per_token", modelsUrl: "https://generativelanguage.googleapis.com/v1beta/models", authHeader: k => ({ "x-goog-api-key": k }) },
-  "openrouter":          { envVar: "OPENROUTER_API_KEY",   authKey: "openrouter",            passPatterns: ["api/openrouter"],                billing: "pay_per_token" },
-  "chutes":              { envVar: "CHUTES_API_KEY",       authKey: "chutes",                passPatterns: ["api/chutes"],                    billing: "subscription" },
-  "mistral":             { envVar: "MISTRAL_API_KEY",      authKey: "mistral",               passPatterns: ["api/mistral"],                   billing: "pay_per_token", modelsUrl: "https://api.mistral.ai/v1/models", authHeader: k => ({ "Authorization": `Bearer ${k}` }) },
-  "groq":                { envVar: "GROQ_API_KEY",         authKey: "groq",                  passPatterns: ["api/groq"],                      billing: "pay_per_token" },
-  "cerebras":            { envVar: "CEREBRAS_API_KEY",     authKey: "cerebras",              passPatterns: ["api/cerebras"],                  billing: "pay_per_token" },
-  "xai":                 { envVar: "XAI_API_KEY",          authKey: "xai",                   passPatterns: ["api/xai"],                       billing: "pay_per_token" },
+  "anthropic":           { envVar: "ANTHROPIC_API_KEY",    authKey: "anthropic",             passPatterns: ["api/claude", "api/anthropic"],   billing: "subscription", modelsUrl: "https://api.anthropic.com/v1/models?limit=100", authHeader: k => ({ "x-api-key": k, "anthropic-version": "2023-06-01" }), baseUrl: "https://api.anthropic.com", api: "anthropic" },
+  "openai":              { envVar: "OPENAI_API_KEY",       authKey: "openai",                passPatterns: ["api/openai"],                    billing: "pay_per_token", modelsUrl: "https://api.openai.com/v1/models", authHeader: k => ({ "Authorization": `Bearer ${k}` }), baseUrl: "https://api.openai.com", api: "openai-responses" },
+  "google":              { envVar: "GEMINI_API_KEY",       authKey: "google",                passPatterns: ["api/gemini", "api/google"],      billing: "pay_per_token", modelsUrl: "https://generativelanguage.googleapis.com/v1beta/models", authHeader: k => ({ "x-goog-api-key": k }), baseUrl: "https://generativelanguage.googleapis.com/v1beta", api: "gemini" },
+  "openrouter":          { envVar: "OPENROUTER_API_KEY",   authKey: "openrouter",            passPatterns: ["api/openrouter"],                billing: "pay_per_token", baseUrl: "https://openrouter.ai/api/v1", api: "openai-completions" },
+  "chutes":              { envVar: "CHUTES_API_KEY",       authKey: "chutes",                passPatterns: ["api/chutes"],                    billing: "subscription", baseUrl: "https://llm.chutes.ai/v1", api: "openai-completions" },
+  "mistral":             { envVar: "MISTRAL_API_KEY",      authKey: "mistral",               passPatterns: ["api/mistral"],                   billing: "pay_per_token", modelsUrl: "https://api.mistral.ai/v1/models", authHeader: k => ({ "Authorization": `Bearer ${k}` }), baseUrl: "https://api.mistral.ai/v1", api: "openai-completions" },
+  "groq":                { envVar: "GROQ_API_KEY",         authKey: "groq",                  passPatterns: ["api/groq"],                      billing: "pay_per_token", baseUrl: "https://api.groq.com/openai/v1", api: "openai-completions" },
+  "cerebras":            { envVar: "CEREBRAS_API_KEY",     authKey: "cerebras",              passPatterns: ["api/cerebras"],                  billing: "pay_per_token", baseUrl: "https://api.cerebras.ai/v1", api: "openai-completions" },
+  "xai":                 { envVar: "XAI_API_KEY",          authKey: "xai",                   passPatterns: ["api/xai"],                       billing: "pay_per_token", baseUrl: "https://api.x.ai/v1", api: "openai-completions" },
   "zai":                 { envVar: "ZAI_API_KEY",          authKey: "zai",                   passPatterns: ["api/zai"],                       billing: "pay_per_token" },
   "huggingface":         { envVar: "HF_TOKEN",             authKey: "huggingface",           passPatterns: ["api/huggingface", "api/hf"],     billing: "pay_per_token" },
   "kimi-coding":         { envVar: "KIMI_API_KEY",         authKey: "kimi-coding",           passPatterns: ["api/kimi"],                      billing: "pay_per_token" },
@@ -98,9 +100,9 @@ const PROVIDER_MAP: Record<string, ProviderDef> = {
   "opencode-go":         { envVar: "OPENCODE_API_KEY",     authKey: "opencode-go",           passPatterns: [],                                billing: "pay_per_token" },
   "vercel-ai-gateway":   { envVar: "AI_GATEWAY_API_KEY",   authKey: "vercel-ai-gateway",     passPatterns: ["api/vercel"],                    billing: "pay_per_token" },
   "azure-openai":        { envVar: "AZURE_OPENAI_API_KEY", authKey: "azure-openai-responses",passPatterns: ["api/azure"],                     billing: "pay_per_token" },
-  "deepseek":            { envVar: "DEEPSEEK_API_KEY",     authKey: "deepseek",              passPatterns: ["api/deepseek"],                  billing: "pay_per_token", modelsUrl: "https://api.deepseek.com/models", authHeader: k => ({ "Authorization": `Bearer ${k}` }) },
+  "deepseek":            { envVar: "DEEPSEEK_API_KEY",     authKey: "deepseek",              passPatterns: ["api/deepseek"],                  billing: "pay_per_token", modelsUrl: "https://api.deepseek.com/models", authHeader: k => ({ "Authorization": `Bearer ${k}` }), baseUrl: "https://api.deepseek.com", api: "openai-completions" },
   "github-copilot":      {                                 authKey: "github-copilot",        passPatterns: [],                                billing: "subscription" },
-  "qwen-cli":            {                                 authKey: "qwen-cli",              passPatterns: [],  cliAuthFiles: [{ path: "~/.qwen/oauth_creds.json", tokenField: "access_token" }],  billing: "subscription" },
+  "qwen-cli":            {                                 authKey: "qwen-cli",              passPatterns: [],  cliAuthFiles: [{ path: "~/.qwen/oauth_creds.json", tokenField: "access_token" }],  billing: "subscription", baseUrl: "https://chat.qwen.ai/api", api: "openai-completions" },
   "gemini-cli":          {                                 authKey: "gemini-cli",            passPatterns: [],  cliAuthFiles: [{ path: "~/.gemini/oauth_creds.json", tokenField: "access_token" }],  billing: "subscription" },
   "antigravity":         {                                 authKey: "antigravity",           passPatterns: [],                                billing: "subscription" },
   "ollama":              { local: true,                                                      passPatterns: [],                                billing: "subscription" },
@@ -1050,6 +1052,46 @@ export default function (pi: ExtensionAPI) {
       });
 
       return proxy;
+    }
+
+    // Register discovered providers with pi's model registry
+    // so modelRegistry.find() works for direct model access and failover
+    for (const [provId, def] of Object.entries(PROVIDER_MAP)) {
+      if (!def.baseUrl || !def.api) continue;
+      const keys = cfg.providers?.[provId]?.keys;
+      if (!keys?.length) continue;
+      const rawKey = keys[activeKeyIdx[provId] ?? 0].key;
+      const apiKey = resolveKeyValue(rawKey);
+      if (!apiKey || apiKey === rawKey && rawKey.startsWith("__local__")) continue; // skip unresolvable
+
+      // Collect models for this provider from available_models + model_metrics
+      const provModels: string[] = [];
+      const seen = new Set<string>();
+      for (const m of cache.available_models ?? []) {
+        if (m.provider === provId && !seen.has(m.id)) { provModels.push(m.id); seen.add(m.id); }
+      }
+      for (const ref of Object.keys(cfg.model_metrics)) {
+        const { provider, modelId } = splitRef(ref);
+        if (provider === provId && !seen.has(modelId)) { provModels.push(modelId); seen.add(modelId); }
+      }
+      if (!provModels.length) continue;
+
+      try {
+        pi.registerProvider(provId, {
+          baseUrl: def.baseUrl,
+          apiKey,
+          api: def.api,
+          models: provModels.map(id => ({
+            id,
+            name: `${provId}/${id}`,
+            reasoning: true,
+            input: ["text", "image"] as any,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            contextWindow: 200_000,
+            maxTokens: 64_000,
+          })),
+        });
+      } catch { /* provider already registered or config error */ }
     }
 
     for (const [groupName, g] of Object.entries(cfg.model_groups)) {
