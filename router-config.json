@@ -1,25 +1,44 @@
 {
-  "providers": {
-    "anthropic": {
-      "billing": "subscription",
-      "monthly_cost_usd": 200
+    "providers": {
+        "anthropic": {
+            "billing": "subscription",
+            "monthly_cost_usd": 200
+        },
+        "chutes": {
+            "billing": "subscription",
+            "monthly_cost_usd": 20
+        },
+        "openrouter": {
+            "billing": "pay_per_token"
+        }
     },
-    "chutes": {
-      "billing": "subscription",
-      "monthly_cost_usd": 100
+
+    "model_groups": {
+        "strategic": {
+            "description": "Best available model by intelligence",
+            "method": "best"
+        },
+        "tactical": {
+            "description": "ELO ≥1400, cheapest (prefer subscription)",
+            "method": "tiered",
+            "min_gdpval": 1400
+        },
+        "operational": {
+            "description": "ELO ≥1200, cheapest (prefer subscription)",
+            "method": "tiered",
+            "min_gdpval": 1200
+        },
+        "scout": {
+            "description": "ELO ≥1000, cheapest (prefer subscription)",
+            "method": "tiered",
+            "min_gdpval": 1000
+        },
+        "fallback": {
+            "description": "ELO ≥1300, cheapest available",
+            "method": "tiered",
+            "min_gdpval": 1300
+        }
     },
-    "openrouter": {
-      "billing": "pay_per_token"
-    }
-  },
 
-  "model_groups": {
-    "strategic":  { "description": "Best available model by intelligence",             "method": "best" },
-    "tactical":   { "description": "Top 75% quality, cheapest (prefer subscription)",  "method": "tiered", "min_gdpval_pct": 75 },
-    "operational":{ "description": "Top 50% quality, cheapest (prefer subscription)",  "method": "tiered", "min_gdpval_pct": 50 },
-    "scout":      { "description": "Top 25% quality, cheapest (prefer subscription)",  "method": "tiered", "min_gdpval_pct": 25 },
-    "fallback":   { "description": "Any available model, cheapest",                    "method": "tiered", "min_gdpval_pct": 0  }
-  },
-
-  "model_metrics": {}
+    "model_metrics": {}
 }

@@ -17,6 +17,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { execSync } from "node:child_process";
 import { homedir } from "node:os";
+import YAML from "yaml";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -42,29 +43,35 @@ interface Cache {
   usage_log?: { ref: string; tokens: number; ts: number }[]; // token usage history
 }
 
-// ── Constants ──────────────────────────────────────────────────────────────
+// ── Constants (loaded from router-defaults.yaml) ───────────────────────────
 
-const BACKOFF = [1, 2, 4, 8, 16, 32, 64, 90].map(m => m * 60_000); // minutes → ms
-const SOFT_BACKOFF = [30_000, 60_000, 120_000, 300_000]; // 30s, 1m, 2m, 5m — lighter for empty responses
-const COST_MUX_AT_HIT = 4;
-const SUB_DISCOUNT = 0.5;
-const MODELS_TTL = 24 * 3_600_000;
-const MAX_STREAM_RETRIES = 2; // retry up to 2 more candidates on soft failure
-const EMPTY_RESPONSE_TIMEOUT_MS = 30_000; // if no tokens after 30s, consider it a soft failure
-const GDPVAL_URL = "https://artificialanalysis.ai/evaluations/gdpval-aa";
+interface Defaults {
+  gdpval_url: string;
+  backoff_minutes: number[];
+  soft_backoff_ms: number[];
+  cost_mux_at_hit: number;
+  sub_discount: number;
+  models_ttl_ms: number;
+  max_stream_retries: number;
+  empty_response_timeout_ms: number;
+  strip_prefixes: string[];
+  strip_suffixes: string[];
+}
 
-const GDPVAL_BUILTIN: Record<string, number> = {
-  "glm-5": 1418, "glm-4.7": 1209, "glm-4.6": 1046, "kimi-k2.5": 1291,
-  "minimax-m2.5": 1215, "minimax-m2": 1057, "mimo-v2-flash": 1115,
-  "qwen3.5-397b": 1258, "qwen3.5-27b": 1208, "qwen3-coder-next": 944,
-  "qwen3-235b-a22b": 840, "qwen3-32b": 540, "qwen3-coder-plus": 944, "qwen3-coder-flash": 800,
-  "deepseek-v3.2": 1202, "deepseek-v3.1": 1116, "deepseek-v3": 470, "deepseek-r1-0528": 712,
-  "mistral-large-3": 893, "mistral-small-3.1": 386,
-  "gpt-oss-120b": 971, "gpt-oss-20b": 694,
-  "llama-3.3-70b": 453, "hermes-4-405b": 623,
-  "claude-opus-4": 1450, "claude-sonnet-4": 1380, "claude-haiku-4": 1100,
-  "gpt-4.5": 1320, "gpt-4o": 1200, "o3": 1400, "o4-mini": 1250,
-};
+function loadDefaults(extDir: string): Defaults {
+  const yamlPath = path.join(extDir, "router-defaults.yaml");
+  return YAML.parse(fs.readFileSync(yamlPath, "utf-8")) as Defaults;
+}
+
+const _defaults = loadDefaults(path.dirname(new URL(import.meta.url).pathname));
+const BACKOFF = _defaults.backoff_minutes.map(m => m * 60_000);
+const SOFT_BACKOFF = _defaults.soft_backoff_ms;
+const COST_MUX_AT_HIT = _defaults.cost_mux_at_hit;
+const SUB_DISCOUNT = _defaults.sub_discount;
+const MODELS_TTL = _defaults.models_ttl_ms;
+const MAX_STREAM_RETRIES = _defaults.max_stream_retries;
+const EMPTY_RESPONSE_TIMEOUT_MS = _defaults.empty_response_timeout_ms;
+const GDPVAL_URL = _defaults.gdpval_url;
 
 // ── Provider Discovery Map ─────────────────────────────────────────────
 
@@ -109,12 +116,8 @@ const PROVIDER_MAP: Record<string, ProviderDef> = {
   "lm-studio":           { local: true,                                                      passPatterns: [],                                billing: "subscription" },
 };
 
-const STRIP_PRE = ["chutesai/","deepseek-ai/","qwen/","moonshotai/","zai-org/","z-ai/",
-  "xiaomimimo/","minimaxai/","openai/","nvidia/","google/","mistralai/","openrouter/",
-  "meta-llama/","nousresearch/","unsloth/","liquid/","tngtech/","arcee-ai/","stepfun/",
-  "cognitivecomputations/","rednote-hilab/"];
-const STRIP_SUF = ["-tee",":free",":api","-instruct","-thinking","-chat","-reasoning",
-  "-fp8","-preview","-2507","-0324","-0528"];
+const STRIP_PRE = _defaults.strip_prefixes;
+const STRIP_SUF = _defaults.strip_suffixes;
 
 function stripDateSuffix(s: string): string {
   // Strip trailing -YYYYMMDD or -YYMMDD patterns (e.g., -20250514)
@@ -133,7 +136,7 @@ export default function (pi: ExtensionAPI) {
   let metrics: Record<string, Metrics> = {};
   let limits = new Map<string, RateLimit>();
   let rrCounters: Record<string, number> = {};
-  let gdpval: Record<string, number> = { ...GDPVAL_BUILTIN };
+  let gdpval: Record<string, number> = {};
   let scanning = false;
   let activeGroup: string | null = null;
   let sessionStart = Date.now();
@@ -145,6 +148,12 @@ export default function (pi: ExtensionAPI) {
 
   function norm(s: string): string {
     s = s.toLowerCase();
+    // Strip provider prefix (e.g. "anthropic/", "chutes/") — take last segment after known providers
+    const slash = s.indexOf("/");
+    if (slash !== -1 && slash < s.length - 1) {
+      const maybeProv = s.slice(0, slash);
+      if (PROVIDER_MAP[maybeProv] || cfg?.providers?.[maybeProv]) s = s.slice(slash + 1);
+    }
     for (const p of STRIP_PRE) s = s.replace(p, "");
     for (const x of STRIP_SUF) s = s.replace(x, "");
     s = stripDateSuffix(s);
@@ -188,7 +197,7 @@ export default function (pi: ExtensionAPI) {
       fs.mkdirSync(path.dirname(cachePath), { recursive: true });
       if (fs.existsSync(cachePath)) {
         cache = JSON.parse(fs.readFileSync(cachePath, "utf-8"));
-        if (cache.gdpval_scores) gdpval = { ...GDPVAL_BUILTIN, ...cache.gdpval_scores };
+        if (cache.gdpval_scores) gdpval = { ...cache.gdpval_scores };
         if (cache.benchmarks) {
           for (const [ref, tps] of Object.entries(cache.benchmarks)) {
             if (!metrics[ref]) metrics[ref] = { gdpval: lookupGdp(ref) ?? 50, throughput_tps: tps, avg_latency_ms: tps > 0 ? 100000 / tps : 1000, cost_per_m: 0, last_updated: Date.now() };
@@ -359,7 +368,7 @@ export default function (pi: ExtensionAPI) {
           const re = /<div[^>]*>([^<]{3,80})<\/div><\/td>\s*<td[^>]*>(\d{3,4})<\/td>/g;
           let m; const scores: Record<string, number> = {};
           while ((m = re.exec(html))) { const nm = m[1].trim(); if (nm && /[A-Za-z]/.test(nm) && !nm.startsWith("<")) scores[nm] = +m[2]; }
-          if (Object.keys(scores).length) { gdpval = { ...GDPVAL_BUILTIN, ...scores }; cache.gdpval_scores = gdpval; cache.gdpval_scraped = true; }
+          if (Object.keys(scores).length) { gdpval = { ...scores }; cache.gdpval_scores = gdpval; cache.gdpval_scraped = true; }
         } catch { /* scrape failed, use builtins */ }
       }
       const age = cache.models_cached ? Date.now() - new Date(cache.models_cached).getTime() : Infinity;

@@ -22,10 +22,14 @@
   "files": [
     "index.ts",
     "router-config.json",
+    "router-defaults.yaml",
     "skills/",
     "PI.md",
     "README.md"
   ],
+  "dependencies": {
+    "yaml": "^2.0.0"
+  },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-ai": "*",
