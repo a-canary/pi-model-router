@@ -154,60 +154,47 @@ export default function (pi: ExtensionAPI) {
     return s.replace(/[^a-z0-9]/g, "");
   }
 
-  /** Extract sorted tokens from a model name (before collapsing to single string) */
-  function tokenize(s: string): string[] {
+  // GDPval parameter suffixes — same base model, different inference params
+  const PARAM_SUFFIXES = ["-non-reasoning-low-effort", "-non-reasoning-high-effort",
+    "-adaptive", "-non-reasoning", "-reasoning", "-thinking",
+    "-low-effort", "-high-effort", "-max-effort"];
+
+  /** Extract base model tokens: strip provider/org, params, suffixes, dates, then split to sorted token set */
+  function baseTokens(s: string): Set<string> {
     s = s.toLowerCase();
     const slash = s.lastIndexOf("/");
     if (slash !== -1 && slash < s.length - 1) s = s.slice(slash + 1);
+    for (const ps of PARAM_SUFFIXES) s = s.replace(ps, "");
     for (const x of STRIP_SUF) s = s.replace(x, "");
     s = stripDateSuffix(s);
-    return s.match(/[a-z]+|\d+/g)?.sort() ?? [];
+    return new Set(s.match(/[a-z]+|\d+/g) ?? []);
   }
 
-  /** Check if one token set is a subset of the other */
-  function tokensMatch(a: string[], b: string[]): boolean {
-    const sa = new Set(a), sb = new Set(b);
-    if (sa.size <= sb.size) return [...sa].every(t => sb.has(t));
-    return [...sb].every(t => sa.has(t));
-  }
-
-  // Model variant suffixes — indicate a distinct (typically weaker) model
-  const VARIANT_TAGS = ["turbo", "flash", "mini", "lite", "nano", "micro", "small", "ultra", "plus", "fast"];
-
-  /** Check if a substring match is valid (reject base↔variant cross-matches) */
-  function validSubstringMatch(shorter: string, longer: string): boolean {
-    const extra = longer.replace(shorter, "");
-    // If the extra part contains a variant tag not in the shorter, reject
-    for (const v of VARIANT_TAGS) {
-      if (extra.includes(v) && !shorter.includes(v)) return false;
-      if (shorter.includes(v) && !longer.includes(v)) return false;
-    }
+  function setsEqual(a: Set<string>, b: Set<string>): boolean {
+    if (a.size !== b.size) return false;
+    for (const v of a) if (!b.has(v)) return false;
     return true;
   }
 
+  // Build lookup index: base-token-set → best GDPval score (lazily rebuilt when gdpval changes)
+  let gdpvalIndex: Map<string, number> | null = null;
+  let gdpvalVersion = 0;
+  let lastIndexVersion = -1;
+
+  function buildGdpvalIndex() {
+    gdpvalIndex = new Map();
+    for (const [slug, score] of Object.entries(gdpval)) {
+      const key = [...baseTokens(slug)].sort().join("|");
+      const existing = gdpvalIndex.get(key);
+      if (existing === undefined || score > existing) gdpvalIndex.set(key, score);
+    }
+    lastIndexVersion = gdpvalVersion;
+  }
+
   function lookupGdp(id: string): number | null {
-    const n = norm(id);
-    let best: number | null = null;
-    // Pass 1: substring match with variant guard
-    for (const [k, v] of Object.entries(gdpval)) {
-      const nk = norm(k);
-      if (nk === n) { if (best === null || v > best) best = v; continue; }
-      if (nk.includes(n) && validSubstringMatch(n, nk)) { if (best === null || v > best) best = v; }
-      else if (n.includes(nk) && validSubstringMatch(nk, n)) { if (best === null || v > best) best = v; }
-    }
-    if (best !== null) return best;
-    // Pass 2: token-set match with variant guard (handles word reordering)
-    const tId = tokenize(id);
-    const idVariants = new Set(tId.filter(t => VARIANT_TAGS.includes(t)));
-    for (const [k, v] of Object.entries(gdpval)) {
-      const tK = tokenize(k);
-      const kVariants = new Set(tK.filter(t => VARIANT_TAGS.includes(t)));
-      // Variant tags must match exactly between id and key
-      const sameVariants = idVariants.size === kVariants.size && [...idVariants].every(v => kVariants.has(v));
-      if (!sameVariants) continue;
-      if (tokensMatch(tId, tK)) { if (best === null || v > best) best = v; }
-    }
-    return best;
+    if (lastIndexVersion !== gdpvalVersion) buildGdpvalIndex();
+    const key = [...baseTokens(id)].sort().join("|");
+    return gdpvalIndex!.get(key) ?? null;
   }
 
   function splitRef(ref: string) {
@@ -229,7 +216,7 @@ export default function (pi: ExtensionAPI) {
 
   function load() {
     cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
-    if (cfg.gdpval_builtin) Object.assign(gdpval, cfg.gdpval_builtin);
+    if (cfg.gdpval_builtin) { Object.assign(gdpval, cfg.gdpval_builtin); gdpvalVersion++; }
   }
 
   function loadCache() {
@@ -237,7 +224,7 @@ export default function (pi: ExtensionAPI) {
       fs.mkdirSync(path.dirname(cachePath), { recursive: true });
       if (fs.existsSync(cachePath)) {
         cache = JSON.parse(fs.readFileSync(cachePath, "utf-8"));
-        if (cache.gdpval_scores) gdpval = { ...cache.gdpval_scores };
+        if (cache.gdpval_scores) { gdpval = { ...cache.gdpval_scores }; gdpvalVersion++; }
         if (cache.benchmarks) {
           for (const [ref, tps] of Object.entries(cache.benchmarks)) {
             if (!metrics[ref]) metrics[ref] = { gdpval: lookupGdp(ref) ?? 50, throughput_tps: tps, avg_latency_ms: tps > 0 ? 100000 / tps : 1000, cost_per_m: 0, last_updated: Date.now() };
@@ -420,7 +407,7 @@ export default function (pi: ExtensionAPI) {
             const key = slug ?? nm;
             if (!scores[key] || score > scores[key]) scores[key] = score;
           }
-          if (Object.keys(scores).length) { gdpval = { ...scores }; cache.gdpval_scores = gdpval; cache.gdpval_scraped = true; }
+          if (Object.keys(scores).length) { gdpval = { ...scores }; gdpvalVersion++; cache.gdpval_scores = gdpval; cache.gdpval_scraped = true; }
         } catch { /* scrape failed, use builtins */ }
       }
       const age = cache.models_cached ? Date.now() - new Date(cache.models_cached).getTime() : Infinity;

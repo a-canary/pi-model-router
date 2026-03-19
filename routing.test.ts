@@ -24,54 +24,31 @@ function norm(s: string): string {
   return s.replace(/[^a-z0-9]/g, "");
 }
 
-function tokenize(s: string): string[] {
+// GDPval parameter suffixes — same base model, different inference params
+const PARAM_SUFFIXES = ["-non-reasoning-low-effort", "-non-reasoning-high-effort",
+  "-adaptive", "-non-reasoning", "-reasoning", "-thinking",
+  "-low-effort", "-high-effort", "-max-effort"];
+
+function baseTokens(s: string): Set<string> {
   s = s.toLowerCase();
   const slash = s.lastIndexOf("/");
   if (slash !== -1 && slash < s.length - 1) s = s.slice(slash + 1);
+  for (const ps of PARAM_SUFFIXES) s = s.replace(ps, "");
   for (const x of STRIP_SUF) s = s.replace(x, "");
   s = stripDateSuffix(s);
-  return s.match(/[a-z]+|\d+/g)?.sort() ?? [];
-}
-
-function tokensMatch(a: string[], b: string[]): boolean {
-  const sa = new Set(a), sb = new Set(b);
-  if (sa.size <= sb.size) return [...sa].every(t => sb.has(t));
-  return [...sb].every(t => sa.has(t));
-}
-
-const VARIANT_TAGS = ["turbo", "flash", "mini", "lite", "nano", "micro", "small", "ultra", "plus", "fast"];
-
-function validSubstringMatch(shorter: string, longer: string): boolean {
-  const extra = longer.replace(shorter, "");
-  for (const v of VARIANT_TAGS) {
-    if (extra.includes(v) && !shorter.includes(v)) return false;
-    if (shorter.includes(v) && !longer.includes(v)) return false;
-  }
-  return true;
+  return new Set(s.match(/[a-z]+|\d+/g) ?? []);
 }
 
 function lookupGdp(id: string, gdpval: Record<string, number>): number | null {
-  const n = norm(id);
-  let best: number | null = null;
-  // Pass 1: substring match with variant guard
-  for (const [k, v] of Object.entries(gdpval)) {
-    const nk = norm(k);
-    if (nk === n) { if (best === null || v > best) best = v; continue; }
-    if (nk.includes(n) && validSubstringMatch(n, nk)) { if (best === null || v > best) best = v; }
-    else if (n.includes(nk) && validSubstringMatch(nk, n)) { if (best === null || v > best) best = v; }
+  // Build index: base-token-key → best score
+  const index = new Map<string, number>();
+  for (const [slug, score] of Object.entries(gdpval)) {
+    const key = [...baseTokens(slug)].sort().join("|");
+    const existing = index.get(key);
+    if (existing === undefined || score > existing) index.set(key, score);
   }
-  if (best !== null) return best;
-  // Pass 2: token-set match with variant guard
-  const tId = tokenize(id);
-  const idVariants = new Set(tId.filter(t => VARIANT_TAGS.includes(t)));
-  for (const [k, v] of Object.entries(gdpval)) {
-    const tK = tokenize(k);
-    const kVariants = new Set(tK.filter(t => VARIANT_TAGS.includes(t)));
-    const sameVariants = idVariants.size === kVariants.size && [...idVariants].every(v => kVariants.has(v));
-    if (!sameVariants) continue;
-    if (tokensMatch(tId, tK)) { if (best === null || v > best) best = v; }
-  }
-  return best;
+  const key = [...baseTokens(id)].sort().join("|");
+  return index.get(key) ?? null;
 }
 
 interface Metrics { gdpval: number; throughput_tps: number; avg_latency_ms: number; cost_per_m: number; }
@@ -114,6 +91,8 @@ const GDPVAL_SCORES: Record<string, number> = {
   "claude-opus-4-5": 1416,
   "claude-4-5-haiku": 1147,
   "claude-4-5-haiku-reasoning": 1173,
+  "claude-4-sonnet": 1149,
+  "claude-4-sonnet-thinking": 1151,
   "glm-5": 1418,
   "glm-5-non-reasoning": 1334,
   "deepseek-v3-2": 1098,
@@ -125,6 +104,7 @@ const AVAILABLE_MODELS: AvailableModel[] = [
   // Anthropic models (from API discovery)
   { id: "claude-opus-4-6", provider: "anthropic", cost_per_m: 0 },
   { id: "claude-sonnet-4-6", provider: "anthropic", cost_per_m: 0 },
+  { id: "claude-sonnet-4-20250514", provider: "anthropic", cost_per_m: 0 },
   { id: "claude-opus-4-5-20251101", provider: "anthropic", cost_per_m: 0 },
   { id: "claude-haiku-4-5-20251001", provider: "anthropic", cost_per_m: 0 },
   // Chutes models
@@ -196,16 +176,28 @@ describe("norm() strips provider and org prefixes via lastIndexOf", () => {
   });
 });
 
-describe("variant guard prevents base↔variant cross-matches", () => {
-  it("GLM-5-Turbo does NOT match GLM-5 score", () => {
+describe("exact token-set matching prevents cross-model contamination", () => {
+  it("GLM-5-Turbo does NOT match GLM-5 score (different model)", () => {
     const score = lookupGdp("chutes/zai-org/GLM-5-Turbo", GDPVAL_SCORES);
-    // GLM-5 is 1418, but Turbo is a distinct variant — should NOT inherit that score
-    expect(score).not.toBe(1418);
+    expect(score).toBeNull();
   });
 
-  it("GLM-5-TEE still matches GLM-5 (TEE is stripped suffix, not a variant)", () => {
+  it("GLM-5-TEE matches GLM-5 (TEE is stripped suffix)", () => {
     const score = lookupGdp("chutes/zai-org/GLM-5-TEE", GDPVAL_SCORES);
     expect(score).toBe(1418);
+  });
+
+  it("claude-sonnet-4 does NOT match claude-sonnet-4-6 (different version)", () => {
+    const score4 = lookupGdp("anthropic/claude-sonnet-4-20250514", GDPVAL_SCORES);
+    const score46 = lookupGdp("anthropic/claude-sonnet-4-6", GDPVAL_SCORES);
+    expect(score4).not.toBe(score46);
+  });
+
+  it("GDPval parameter variants map to same base model", () => {
+    // claude-sonnet-4-6, claude-sonnet-4-6-adaptive, claude-sonnet-4-6-non-reasoning-low-effort
+    // all share base tokens [4, 6, claude, sonnet] → highest score wins
+    const score = lookupGdp("anthropic/claude-sonnet-4-6", GDPVAL_SCORES);
+    expect(score).toBe(1633); // from claude-sonnet-4-6-adaptive
   });
 });
 
