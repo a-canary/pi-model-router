@@ -171,19 +171,41 @@ export default function (pi: ExtensionAPI) {
     return [...sb].every(t => sa.has(t));
   }
 
+  // Model variant suffixes — indicate a distinct (typically weaker) model
+  const VARIANT_TAGS = ["turbo", "flash", "mini", "lite", "nano", "micro", "small", "ultra", "plus", "fast"];
+
+  /** Check if a substring match is valid (reject base↔variant cross-matches) */
+  function validSubstringMatch(shorter: string, longer: string): boolean {
+    const extra = longer.replace(shorter, "");
+    // If the extra part contains a variant tag not in the shorter, reject
+    for (const v of VARIANT_TAGS) {
+      if (extra.includes(v) && !shorter.includes(v)) return false;
+      if (shorter.includes(v) && !longer.includes(v)) return false;
+    }
+    return true;
+  }
+
   function lookupGdp(id: string): number | null {
     const n = norm(id);
     let best: number | null = null;
-    // Pass 1: substring match (fast, handles most cases)
+    // Pass 1: substring match with variant guard
     for (const [k, v] of Object.entries(gdpval)) {
       const nk = norm(k);
-      if (nk.includes(n) || n.includes(nk)) { if (best === null || v > best) best = v; }
+      if (nk === n) { if (best === null || v > best) best = v; continue; }
+      if (nk.includes(n) && validSubstringMatch(n, nk)) { if (best === null || v > best) best = v; }
+      else if (n.includes(nk) && validSubstringMatch(nk, n)) { if (best === null || v > best) best = v; }
     }
     if (best !== null) return best;
-    // Pass 2: token-set match (handles word reordering, e.g. claude-haiku-4-5 vs claude-4-5-haiku)
+    // Pass 2: token-set match with variant guard (handles word reordering)
     const tId = tokenize(id);
+    const idVariants = new Set(tId.filter(t => VARIANT_TAGS.includes(t)));
     for (const [k, v] of Object.entries(gdpval)) {
-      if (tokensMatch(tId, tokenize(k))) { if (best === null || v > best) best = v; }
+      const tK = tokenize(k);
+      const kVariants = new Set(tK.filter(t => VARIANT_TAGS.includes(t)));
+      // Variant tags must match exactly between id and key
+      const sameVariants = idVariants.size === kVariants.size && [...idVariants].every(v => kVariants.has(v));
+      if (!sameVariants) continue;
+      if (tokensMatch(tId, tK)) { if (best === null || v > best) best = v; }
     }
     return best;
   }
@@ -698,10 +720,12 @@ export default function (pi: ExtensionAPI) {
     const billing = provCfg?.billing ?? provDef?.billing ?? "pay_per_token";
     // Local providers (ollama, lm-studio)
     if (provDef?.local) return 2;
-    // Free models (openrouter :free variants, or cost_per_m === 0 from discovery)
+    // Subscription providers — trust provider billing over per-model cost_per_m
+    // (APIs like Anthropic report cost_per_m=0 because pricing isn't in /v1/models)
+    if (billing === "subscription") return 1;
+    // Free models (openrouter :free variants, or genuinely free PAYG models)
     const discovered = (cache.available_models ?? []).find(m => `${m.provider}/${m.id}` === ref);
     if (discovered?.cost_per_m === 0) return 0;
-    if (billing === "subscription") return 1;
     return 3; // pay per token
   }
 

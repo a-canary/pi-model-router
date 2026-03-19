@@ -39,23 +39,37 @@ function tokensMatch(a: string[], b: string[]): boolean {
   return [...sb].every(t => sa.has(t));
 }
 
+const VARIANT_TAGS = ["turbo", "flash", "mini", "lite", "nano", "micro", "small", "ultra", "plus", "fast"];
+
+function validSubstringMatch(shorter: string, longer: string): boolean {
+  const extra = longer.replace(shorter, "");
+  for (const v of VARIANT_TAGS) {
+    if (extra.includes(v) && !shorter.includes(v)) return false;
+    if (shorter.includes(v) && !longer.includes(v)) return false;
+  }
+  return true;
+}
+
 function lookupGdp(id: string, gdpval: Record<string, number>): number | null {
   const n = norm(id);
   let best: number | null = null;
-  // Pass 1: substring match
+  // Pass 1: substring match with variant guard
   for (const [k, v] of Object.entries(gdpval)) {
     const nk = norm(k);
-    if (nk.includes(n) || n.includes(nk)) {
-      if (best === null || v > best) best = v;
-    }
+    if (nk === n) { if (best === null || v > best) best = v; continue; }
+    if (nk.includes(n) && validSubstringMatch(n, nk)) { if (best === null || v > best) best = v; }
+    else if (n.includes(nk) && validSubstringMatch(nk, n)) { if (best === null || v > best) best = v; }
   }
   if (best !== null) return best;
-  // Pass 2: token-set match (handles word reordering)
+  // Pass 2: token-set match with variant guard
   const tId = tokenize(id);
+  const idVariants = new Set(tId.filter(t => VARIANT_TAGS.includes(t)));
   for (const [k, v] of Object.entries(gdpval)) {
-    if (tokensMatch(tId, tokenize(k))) {
-      if (best === null || v > best) best = v;
-    }
+    const tK = tokenize(k);
+    const kVariants = new Set(tK.filter(t => VARIANT_TAGS.includes(t)));
+    const sameVariants = idVariants.size === kVariants.size && [...idVariants].every(v => kVariants.has(v));
+    if (!sameVariants) continue;
+    if (tokensMatch(tId, tK)) { if (best === null || v > best) best = v; }
   }
   return best;
 }
@@ -179,6 +193,19 @@ describe("norm() strips provider and org prefixes via lastIndexOf", () => {
 
   it("handles slug-format gdpval keys", () => {
     expect(norm("claude-opus-4-6-adaptive")).toBe("claudeopus46adaptive");
+  });
+});
+
+describe("variant guard prevents base↔variant cross-matches", () => {
+  it("GLM-5-Turbo does NOT match GLM-5 score", () => {
+    const score = lookupGdp("chutes/zai-org/GLM-5-Turbo", GDPVAL_SCORES);
+    // GLM-5 is 1418, but Turbo is a distinct variant — should NOT inherit that score
+    expect(score).not.toBe(1418);
+  });
+
+  it("GLM-5-TEE still matches GLM-5 (TEE is stripped suffix, not a variant)", () => {
+    const score = lookupGdp("chutes/zai-org/GLM-5-TEE", GDPVAL_SCORES);
+    expect(score).toBe(1418);
   });
 });
 
