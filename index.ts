@@ -1316,9 +1316,12 @@ export default function (pi: ExtensionAPI) {
         if (top.length === 0) {
           lines.push("│ (no models configured)");
         } else {
+          // Compute max model name width (capped at 38)
+          const MW = Math.min(38, Math.max(5, ...top.map(t => t.ref.length)));
+
           // Table header
-          lines.push("│ #   Model                           GDP   Lat   TPS   Cost I/O       Usage 1d/7d/30d    Status");
-          lines.push("│ ─   ─────────────────────────────   ───   ───   ───   ───────────    ─────────────────   ──────");
+          lines.push(`│ ${"#".padEnd(3)} ${"Model".padEnd(MW)}  ${"GDP".padStart(4)}  ${"Lat".padStart(5)}  ${"TPS".padStart(4)}  ${"Cost I/O".padStart(11)}  ${"Usage 1d/7d/30d".padStart(15)}  Status`);
+          lines.push(`│ ${"─".padEnd(3)} ${"─".repeat(MW)}  ${"────"}  ${"─────"}  ${"────"}  ${"───────────"}  ${"───────────────"}  ──────`);
 
           for (const { ref, limited, rank } of top) {
             const m = getM(ref);
@@ -1326,23 +1329,23 @@ export default function (pi: ExtensionAPI) {
             const mux = costMux(prov);
             const cost = effCost(ref);
             const price = lookupPrice(ref);
-            const modelShort = ref.length > 32 ? "…" + ref.slice(-31) : ref;
-            const isActive = curModel === ref ? "●" : " ";
-            const status = limited ? `⛔${limitSecs(ref)}s` : isActive ? "active" : "";
+            const modelShort = ref.length > MW ? "…" + ref.slice(-(MW - 1)) : ref;
+            const isActive = curModel === ref;
+            const statusParts: string[] = [];
+            if (limited) statusParts.push(`⛔${limitSecs(ref)}s`);
+            if (mux > 1) statusParts.push(`×${mux}`);
+            if (isActive) statusParts.push("●");
+            const status = statusParts.join(" ") || (limited ? "" : "active");
 
-            // Show input/output pricing if available
             const costDisplay = price
               ? `$${price.input.toFixed(1)}/$${price.output.toFixed(1)}`
               : `$${cost.toFixed(1)}`;
 
-            // Usage: 1d/7d/30d tokens (compact format)
             const u1 = getUsage(ref, 1), u7 = getUsage(ref, 7), u30 = getUsage(ref, 30);
             const usageDisplay = `${fmt(u1)}/${fmt(u7)}/${fmt(u30)}`;
 
-            // Highlight if has mux
-            const muxDisplay = mux > 1 ? `×${mux} ` : "";
-
-            lines.push(`│ ${rank + 1}   ${modelShort.padEnd(32)} ${String(m.gdpval).padStart(3)}  ${String(Math.round(m.avg_latency_ms)).padStart(4)}  ${String(Math.round(m.throughput_tps)).padStart(3)}   ${costDisplay.padStart(10)}     ${usageDisplay.padStart(15)}     ${muxDisplay}${status}`);
+            const sel = rank === 0 ? " ←" : "";
+            lines.push(`│ ${String(rank + 1).padEnd(3)} ${modelShort.padEnd(MW)}  ${String(m.gdpval).padStart(4)}  ${String(Math.round(m.avg_latency_ms)).padStart(5)}  ${String(Math.round(m.throughput_tps)).padStart(4)}  ${costDisplay.padStart(11)}  ${usageDisplay.padStart(15)}  ${status}${sel}`);
           }
         }
         lines.push("│");
