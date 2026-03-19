@@ -358,10 +358,22 @@ export default function (pi: ExtensionAPI) {
             headers: { "User-Agent": "Mozilla/5.0" },
             signal: AbortSignal.timeout(30_000),
           });
-          const html = await res.text();
-          const re = /<div[^>]*>([^<]{3,80})<\/div><\/td>\s*<td[^>]*>(\d{3,4})<\/td>/g;
+          const html = await res.text().then(h => h.replace(/\\"/g, '"'));
+          // Extract slug → name mapping from JSON data embedded in page
+          const slugMap: Record<string, string> = {};
+          const slugRe = /"([a-z0-9][a-z0-9._-]+)","name":"([^"]+)","shortName":"([^"]+)"/g;
+          let sm; while ((sm = slugRe.exec(html))) { slugMap[sm[2]] = sm[1]; if (sm[3] !== sm[2]) slugMap[sm[3]] = sm[1]; }
+          // Extract name → score from HTML table
+          const tableRe = /<div[^>]*>([^<]{3,80})<\/div><\/td>\s*<td[^>]*>(\d{3,4})<\/td>/g;
           let m; const scores: Record<string, number> = {};
-          while ((m = re.exec(html))) { const nm = m[1].trim(); if (nm && /[A-Za-z]/.test(nm) && !nm.startsWith("<")) scores[nm] = +m[2]; }
+          while ((m = tableRe.exec(html))) {
+            const nm = m[1].trim(); if (!nm || !/[A-Za-z]/.test(nm) || nm.startsWith("<")) continue;
+            const score = +m[2];
+            // Prefer slug key (machine-readable) over display name
+            const slug = slugMap[nm];
+            const key = slug ?? nm;
+            if (!scores[key] || score > scores[key]) scores[key] = score;
+          }
           if (Object.keys(scores).length) { gdpval = { ...scores }; cache.gdpval_scores = gdpval; cache.gdpval_scraped = true; }
         } catch { /* scrape failed, use builtins */ }
       }
