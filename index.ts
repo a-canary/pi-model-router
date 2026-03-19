@@ -417,19 +417,24 @@ export default function (pi: ExtensionAPI) {
           .map(async ([provId, def]) => {
             const keys = cfg.providers?.[provId]?.keys;
             if (!keys?.length) return;
-            try {
-              const key = resolveKeyValue(keys[activeKeyIdx[provId] ?? 0].key);
-              const headers = def.authHeader!(key);
-              const d = await fetchJson(def.modelsUrl!, { headers, timeoutMs: 15_000 });
-              const list = d.data ?? d.models ?? [];
-              for (const m of list) {
-                const id = m.id ?? m.name?.replace(/^models\//, "");
-                if (!id) continue;
-                if (/embed|tts|whisper|dall|moderation|babbage|davinci|search|audio|realtime|image|transcri/i.test(id)) continue;
-                const existing = models.find(x => x.provider === provId && x.id === id);
-                if (!existing) models.push({ id, provider: provId, cost_per_m: 0 });
-              }
-            } catch { /* provider scan failed, non-fatal */ }
+            // Try each key until one succeeds (first may be stale)
+            for (let ki = 0; ki < keys.length; ki++) {
+              try {
+                const key = resolveKeyValue(keys[ki].key);
+                const headers = def.authHeader!(key);
+                const d = await fetchJson(def.modelsUrl!, { headers, timeoutMs: 15_000 });
+                const list = d.data ?? d.models ?? [];
+                if (!list.length) continue;
+                for (const m of list) {
+                  const id = m.id ?? m.name?.replace(/^models\//, "");
+                  if (!id) continue;
+                  if (/embed|tts|whisper|dall|moderation|babbage|davinci|search|audio|realtime|image|transcri/i.test(id)) continue;
+                  const existing = models.find(x => x.provider === provId && x.id === id);
+                  if (!existing) models.push({ id, provider: provId, cost_per_m: 0 });
+                }
+                break; // success, stop trying keys
+              } catch { /* try next key */ }
+            }
           });
         await Promise.allSettled(providerScans);
         if (models.length) {
