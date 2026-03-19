@@ -154,12 +154,36 @@ export default function (pi: ExtensionAPI) {
     return s.replace(/[^a-z0-9]/g, "");
   }
 
+  /** Extract sorted tokens from a model name (before collapsing to single string) */
+  function tokenize(s: string): string[] {
+    s = s.toLowerCase();
+    const slash = s.lastIndexOf("/");
+    if (slash !== -1 && slash < s.length - 1) s = s.slice(slash + 1);
+    for (const x of STRIP_SUF) s = s.replace(x, "");
+    s = stripDateSuffix(s);
+    return s.match(/[a-z]+|\d+/g)?.sort() ?? [];
+  }
+
+  /** Check if one token set is a subset of the other */
+  function tokensMatch(a: string[], b: string[]): boolean {
+    const sa = new Set(a), sb = new Set(b);
+    if (sa.size <= sb.size) return [...sa].every(t => sb.has(t));
+    return [...sb].every(t => sa.has(t));
+  }
+
   function lookupGdp(id: string): number | null {
     const n = norm(id);
     let best: number | null = null;
+    // Pass 1: substring match (fast, handles most cases)
     for (const [k, v] of Object.entries(gdpval)) {
       const nk = norm(k);
       if (nk.includes(n) || n.includes(nk)) { if (best === null || v > best) best = v; }
+    }
+    if (best !== null) return best;
+    // Pass 2: token-set match (handles word reordering, e.g. claude-haiku-4-5 vs claude-4-5-haiku)
+    const tId = tokenize(id);
+    for (const [k, v] of Object.entries(gdpval)) {
+      if (tokensMatch(tId, tokenize(k))) { if (best === null || v > best) best = v; }
     }
     return best;
   }
