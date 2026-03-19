@@ -58,7 +58,7 @@ describe("stripDateSuffix", () => {
 
   it("strips 6-digit dates", () => {
     expect(stripDateSuffix("model-250514")).toBe("model");
-    expect(stripDateSuffix("model-0324")).toBe("model-0324"); // 4 digits not stripped
+    expect(stripDateSuffix("model-0324")).toBe("model"); // 4-digit YYMM/MMDD now stripped
   });
 
   it("preserves names without dates", () => {

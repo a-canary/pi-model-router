@@ -118,8 +118,8 @@ const PROVIDER_MAP: Record<string, ProviderDef> = {
 const STRIP_SUF = _defaults.strip_suffixes;
 
 function stripDateSuffix(s: string): string {
-  // Strip trailing -YYYYMMDD or -YYMMDD patterns (e.g., -20250514)
-  return s.replace(/-\d{6,8}$/, "");
+  // Strip trailing date/version tags: -YYYYMMDD, -YYMMDD, -YYMM (e.g., -20250514, -2507, -0324)
+  return s.replace(/-\d{4,8}$/, "");
 }
 
 // ── Extension ──────────────────────────────────────────────────────────────
@@ -400,7 +400,8 @@ export default function (pi: ExtensionAPI) {
           const tableRe = /<div[^>]*>([^<]{3,80})<\/div><\/td>\s*<td[^>]*>(\d{3,4})<\/td>/g;
           let m; const scores: Record<string, number> = {};
           while ((m = tableRe.exec(html))) {
-            const nm = m[1].trim(); if (!nm || !/[A-Za-z]/.test(nm) || nm.startsWith("<")) continue;
+            const nm = m[1].trim().replace(/&#x27;/g, "'").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"');
+            if (!nm || !/[A-Za-z]/.test(nm) || nm.startsWith("<")) continue;
             const score = +m[2];
             // Prefer slug key (machine-readable) over display name
             const slug = slugMap[nm];

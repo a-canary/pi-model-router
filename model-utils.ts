@@ -10,13 +10,13 @@ const STRIP_PRE = ["chutes/","chutesai/","deepseek-ai/","qwen/","moonshotai/","z
 
 // Suffixes to strip from model names
 const STRIP_SUF = ["-tee",":free",":api","-instruct","-thinking","-chat","-reasoning",
-  "-fp8","-preview","-2507","-0324","-0528"];
+  "-fp8","-preview"];
 
 /**
  * Strip trailing date suffixes like -20250514 or -250514
  */
 export function stripDateSuffix(s: string): string {
-  return s.replace(/-\d{6,8}$/, "");
+  return s.replace(/-\d{4,8}$/, "");
 }
 
 /**

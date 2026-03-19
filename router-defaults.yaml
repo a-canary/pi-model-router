@@ -34,6 +34,3 @@ strip_suffixes:
   - "-reasoning"
   - "-fp8"
   - "-preview"
-  - "-2507"
-  - "-0324"
-  - "-0528"
