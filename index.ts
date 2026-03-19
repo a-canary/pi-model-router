@@ -402,7 +402,10 @@ export default function (pi: ExtensionAPI) {
         } catch { /* scrape failed, use builtins */ }
       }
       const age = cache.models_cached ? Date.now() - new Date(cache.models_cached).getTime() : Infinity;
-      if (force || age > MODELS_TTL) {
+      // Also rescan if any configured provider has keys but zero models cached
+      const missingProviders = Object.entries(cfg.providers ?? {})
+        .some(([p, pc]) => pc.keys?.length && !(cache.available_models ?? []).some(m => m.provider === p));
+      if (force || age > MODELS_TTL || missingProviders) {
         const models: Cache["available_models"] = [];
         try {
           const d = await fetchJson("https://llm.chutes.ai/v1/models");
