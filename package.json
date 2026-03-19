@@ -23,6 +23,7 @@
     "index.ts",
     "router-config.json",
     "router-defaults.yaml",
+    "model-map.yaml",
     "skills/",
     "PI.md",
     "README.md"

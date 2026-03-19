@@ -39,14 +39,58 @@ function baseTokens(s: string): Set<string> {
   return new Set(s.match(/[a-z]+|\d+/g) ?? []);
 }
 
+// Model map (simulates model-map.yaml for tests)
+const MODEL_MAP: Record<string, string | null> = {
+  "claude-sonnet-4-6": "claude-sonnet-4-6",
+  "claude-opus-4-6": "claude-opus-4-6",
+  "claude-opus-4-5-": "claude-opus-4-5",      // wildcard prefix
+  "claude-sonnet-4-2": "claude-4-sonnet",      // wildcard prefix
+  "claude-haiku-4-5-": "claude-4-5-haiku",     // wildcard prefix
+  "zai-org/GLM-5-TEE": "glm-5",
+  "zai-org/GLM-5-Turbo": null,                 // explicitly no score
+  "deepseek-ai/DeepSeek-V3-0324-TEE": "deepseek-v3-0324",
+};
+const MODEL_MAP_WILDCARDS: [string, string | null][] = [
+  ["claude-opus-4-5-", "claude-opus-4-5"],
+  ["claude-sonnet-4-2", "claude-4-sonnet"],
+  ["claude-haiku-4-5-", "claude-4-5-haiku"],
+].sort((a, b) => b[0].length - a[0].length);
+
+const KNOWN_PROVIDERS = new Set(["anthropic", "chutes", "openrouter", "openai", "google"]);
+
+function stripProvider(ref: string): string {
+  const i = ref.indexOf("/");
+  if (i === -1) return ref;
+  const prov = ref.slice(0, i);
+  if (KNOWN_PROVIDERS.has(prov)) return ref.slice(i + 1);
+  return ref;
+}
+
+function mapLookup(ref: string): string | null | undefined {
+  const modelId = stripProvider(ref);
+  if (modelId in MODEL_MAP) return MODEL_MAP[modelId];
+  for (const [prefix, slug] of MODEL_MAP_WILDCARDS) {
+    if (modelId.startsWith(prefix)) return slug;
+  }
+  return undefined;
+}
+
 function lookupGdp(id: string, gdpval: Record<string, number>): number | null {
-  // Build index: base-token-key → best score
   const index = new Map<string, number>();
   for (const [slug, score] of Object.entries(gdpval)) {
     const key = [...baseTokens(slug)].sort().join("|");
     const existing = index.get(key);
     if (existing === undefined || score > existing) index.set(key, score);
   }
+
+  // Primary: model map
+  const mapped = mapLookup(id);
+  if (mapped === null) return null;
+  if (mapped !== undefined) {
+    const key = [...baseTokens(mapped)].sort().join("|");
+    return index.get(key) ?? null;
+  }
+  // Fallback: token-set matching
   const key = [...baseTokens(id)].sort().join("|");
   return index.get(key) ?? null;
 }

@@ -154,12 +154,61 @@ export default function (pi: ExtensionAPI) {
     return s.replace(/[^a-z0-9]/g, "");
   }
 
+  // ── Model Map: authoritative model → GDPval slug mapping ────────────
+
+  // Load model-map.yaml: maps "modelId" → "gdpval-slug" (or null)
+  type ModelMap = Record<string, string | null>;
+  let modelMap: ModelMap = {};
+  let modelMapWildcards: [string, string | null][] = []; // [prefix, slug]
+
+  function loadModelMap() {
+    const mapPath = path.join(extDir, "model-map.yaml");
+    try {
+      const raw = YAML.parse(fs.readFileSync(mapPath, "utf-8")) as Record<string, string | null>;
+      modelMap = {};
+      modelMapWildcards = [];
+      for (const [key, slug] of Object.entries(raw)) {
+        if (key === null || typeof key !== "string") continue;
+        if (key.endsWith("*")) {
+          modelMapWildcards.push([key.slice(0, -1), slug]);
+        } else {
+          modelMap[key] = slug;
+        }
+      }
+      // Sort wildcards longest-first for most specific match
+      modelMapWildcards.sort((a, b) => b[0].length - a[0].length);
+    } catch { /* no map file, use fallback only */ }
+  }
+
+  /** Strip provider prefix from ref: "chutes/deepseek-ai/DeepSeek-V3" → "deepseek-ai/DeepSeek-V3" */
+  function stripProvider(ref: string): string {
+    const i = ref.indexOf("/");
+    if (i === -1) return ref;
+    const prov = ref.slice(0, i);
+    if (PROVIDER_MAP[prov] || cfg?.providers?.[prov]) return ref.slice(i + 1);
+    return ref;
+  }
+
+  /** Look up GDPval slug for a model ref using model-map.yaml */
+  function mapLookup(ref: string): string | null | undefined {
+    const modelId = stripProvider(ref);
+    // Exact match
+    if (modelId in modelMap) return modelMap[modelId];
+    // Wildcard match (longest prefix first)
+    for (const [prefix, slug] of modelMapWildcards) {
+      if (modelId.startsWith(prefix)) return slug;
+    }
+    return undefined; // not in map
+  }
+
+  // ── GDPval token-set fallback (for models not in model-map.yaml) ───
+
   // GDPval parameter suffixes — same base model, different inference params
   const PARAM_SUFFIXES = ["-non-reasoning-low-effort", "-non-reasoning-high-effort",
     "-adaptive", "-non-reasoning", "-reasoning", "-thinking",
     "-low-effort", "-high-effort", "-max-effort"];
 
-  /** Extract base model tokens: strip provider/org, params, suffixes, dates, then split to sorted token set */
+  /** Extract base model tokens: strip params, suffixes, dates, then split to sorted token set */
   function baseTokens(s: string): Set<string> {
     s = s.toLowerCase();
     const slash = s.lastIndexOf("/");
@@ -170,13 +219,7 @@ export default function (pi: ExtensionAPI) {
     return new Set(s.match(/[a-z]+|\d+/g) ?? []);
   }
 
-  function setsEqual(a: Set<string>, b: Set<string>): boolean {
-    if (a.size !== b.size) return false;
-    for (const v of a) if (!b.has(v)) return false;
-    return true;
-  }
-
-  // Build lookup index: base-token-set → best GDPval score (lazily rebuilt when gdpval changes)
+  // Lazily-built token index for fallback matching
   let gdpvalIndex: Map<string, number> | null = null;
   let gdpvalVersion = 0;
   let lastIndexVersion = -1;
@@ -192,6 +235,16 @@ export default function (pi: ExtensionAPI) {
   }
 
   function lookupGdp(id: string): number | null {
+    // Primary: model-map.yaml explicit mapping
+    const mapped = mapLookup(id);
+    if (mapped === null) return null; // explicitly no score
+    if (mapped !== undefined) {
+      // Find the slug's score (take highest across parameter variants)
+      if (lastIndexVersion !== gdpvalVersion) buildGdpvalIndex();
+      const key = [...baseTokens(mapped)].sort().join("|");
+      return gdpvalIndex!.get(key) ?? null;
+    }
+    // Fallback: automatic token-set matching
     if (lastIndexVersion !== gdpvalVersion) buildGdpvalIndex();
     const key = [...baseTokens(id)].sort().join("|");
     return gdpvalIndex!.get(key) ?? null;
@@ -899,12 +952,12 @@ export default function (pi: ExtensionAPI) {
 
   // ── Events ─────────────────────────────────────────────────────────────
 
-  load(); loadCache();
+  load(); loadModelMap(); loadCache();
   registerGroupProviders();
 
   pi.on("session_start", async (_ev, ctx) => {
     sessionCtx = ctx;
-    load(); loadCache(); sessionStart = Date.now();
+    load(); loadModelMap(); loadCache(); sessionStart = Date.now();
     discoverKeys();
 
     await registerGroupModels(ctx);
@@ -1271,7 +1324,7 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       load();
       const arg = args?.trim();
-      if (arg === "reload") { load(); loadCache(); ctx.ui.notify("Reloaded", "success"); return; }
+      if (arg === "reload") { load(); loadModelMap(); loadCache(); ctx.ui.notify("Reloaded", "success"); return; }
       if (arg === "scan") { ctx.ui.notify("Scanning...", "info"); await scan(true); ctx.ui.notify(`Done. ${Object.keys(gdpval).length} scores, ${cache.available_models?.length ?? 0} models.`, "success"); return; }
       if (arg === "sync") { load(); registerGroupModels(ctx); ctx.ui.notify("Re-registered group models", "success"); return; }
 
