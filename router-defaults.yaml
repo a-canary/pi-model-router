@@ -23,31 +23,7 @@ models_ttl_ms: 86400000
 max_stream_retries: 2
 empty_response_timeout_ms: 30000
 
-# Model ID normalization — stripped prefixes and suffixes
-strip_prefixes:
-  - "chutesai/"
-  - "deepseek-ai/"
-  - "qwen/"
-  - "moonshotai/"
-  - "zai-org/"
-  - "z-ai/"
-  - "xiaomimimo/"
-  - "minimaxai/"
-  - "openai/"
-  - "nvidia/"
-  - "google/"
-  - "mistralai/"
-  - "openrouter/"
-  - "meta-llama/"
-  - "nousresearch/"
-  - "unsloth/"
-  - "liquid/"
-  - "tngtech/"
-  - "arcee-ai/"
-  - "stepfun/"
-  - "cognitivecomputations/"
-  - "rednote-hilab/"
-
+# Model ID normalization — stripped suffixes (prefixes handled by lastIndexOf("/"))
 strip_suffixes:
   - "-tee"
   - ":free"

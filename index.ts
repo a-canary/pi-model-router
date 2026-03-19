@@ -54,7 +54,6 @@ interface Defaults {
   models_ttl_ms: number;
   max_stream_retries: number;
   empty_response_timeout_ms: number;
-  strip_prefixes: string[];
   strip_suffixes: string[];
 }
 
@@ -116,7 +115,6 @@ const PROVIDER_MAP: Record<string, ProviderDef> = {
   "lm-studio":           { local: true,                                                      passPatterns: [],                                billing: "subscription" },
 };
 
-const STRIP_PRE = _defaults.strip_prefixes;
 const STRIP_SUF = _defaults.strip_suffixes;
 
 function stripDateSuffix(s: string): string {
@@ -148,10 +146,9 @@ export default function (pi: ExtensionAPI) {
 
   function norm(s: string): string {
     s = s.toLowerCase();
-    // Strip provider prefix — take only the model portion after provider/
-    const slash = s.indexOf("/");
+    // Strip to last path segment — "chutes/deepseek-ai/DeepSeek-V3" → "deepseek-v3"
+    const slash = s.lastIndexOf("/");
     if (slash !== -1 && slash < s.length - 1) s = s.slice(slash + 1);
-    for (const p of STRIP_PRE) s = s.replace(p, "");
     for (const x of STRIP_SUF) s = s.replace(x, "");
     s = stripDateSuffix(s);
     return s.replace(/[^a-z0-9]/g, "");
