@@ -148,12 +148,9 @@ export default function (pi: ExtensionAPI) {
 
   function norm(s: string): string {
     s = s.toLowerCase();
-    // Strip provider prefix (e.g. "anthropic/", "chutes/") — take last segment after known providers
+    // Strip provider prefix — take only the model portion after provider/
     const slash = s.indexOf("/");
-    if (slash !== -1 && slash < s.length - 1) {
-      const maybeProv = s.slice(0, slash);
-      if (PROVIDER_MAP[maybeProv] || cfg?.providers?.[maybeProv]) s = s.slice(slash + 1);
-    }
+    if (slash !== -1 && slash < s.length - 1) s = s.slice(slash + 1);
     for (const p of STRIP_PRE) s = s.replace(p, "");
     for (const x of STRIP_SUF) s = s.replace(x, "");
     s = stripDateSuffix(s);
